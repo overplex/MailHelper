@@ -248,7 +248,11 @@ LANGID onto a language, that every string is translated with the same format
 arguments as the Russian original, and the recolouring of the dark date
 fields.
 
-## Licences
+## Licence
+
+MailHelper is licensed under the [Apache License, Version 2.0](LICENSE).
+
+The application icon (`icon.png`) was created with Claude Sonnet 5.5.
 
 `THIRD_PARTY_NOTICES.md` carries the licence of the Go standard library and of
 `golang.org/x/text`, both BSD-3-Clause, whose code is compiled into the
