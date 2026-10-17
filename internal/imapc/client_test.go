@@ -214,6 +214,41 @@ func TestMoveIssuesCopyThenDeleteThenExpunge(t *testing.T) {
 	}
 }
 
+func TestDeleteIssuesDeleteThenExpunge(t *testing.T) {
+	var commands []string
+
+	c := dialFake(t, func(_ *testing.T, r *bufio.Reader, w *bufio.Writer) {
+		for i := 1; i <= 2; i++ {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			commands = append(commands, strings.TrimSpace(line))
+			w.WriteString("A000" + strconv.Itoa(i) + " OK done\r\n")
+			w.Flush()
+		}
+	})
+	c.caps["UIDPLUS"] = true
+
+	session := &Session{cfg: Config{Retries: 0}, client: c}
+	if err := session.Delete([]uint32{4, 8}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	want := []string{
+		`A0001 UID STORE 4,8 +FLAGS.SILENT (\Deleted)`,
+		`A0002 UID EXPUNGE 4,8`,
+	}
+	if len(commands) != len(want) {
+		t.Fatalf("sent %d commands: %q", len(commands), commands)
+	}
+	for i := range want {
+		if commands[i] != want[i] {
+			t.Errorf("command %d = %q, want %q", i+1, commands[i], want[i])
+		}
+	}
+}
+
 func TestMoveStopsOnAServerError(t *testing.T) {
 	c := dialFake(t, func(_ *testing.T, r *bufio.Reader, w *bufio.Writer) {
 		r.ReadString('\n')

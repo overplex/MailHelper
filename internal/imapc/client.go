@@ -1,8 +1,9 @@
 // Package imapc is a small IMAP4rev1 client covering exactly what
 // MailHelper needs: listing folders, searching by internal date, fetching
 // whole messages, and the COPY + \Deleted + EXPUNGE sequence that makes a
-// move. It speaks the protocol directly so that mailbox names can be
-// converted between modified UTF-7 and UTF-8 at both boundaries.
+// move or, without the COPY, a delete. It speaks the protocol directly so
+// that mailbox names can be converted between modified UTF-7 and UTF-8 at
+// both boundaries.
 package imapc
 
 import (

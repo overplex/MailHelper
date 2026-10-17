@@ -14,9 +14,9 @@
       "0409": {
         "identity": {
           "name": "MailHelper",
-          "version": "1.0.0.0"
+          "version": "1.1.0.0"
         },
-        "description": "Copies IMAP messages to disk and moves them between server folders",
+        "description": "Copies IMAP messages to disk, moves and deletes them on the server",
         "minimum-os": "win10",
         "execution-level": "as invoker",
         "ui-access": false,
@@ -38,18 +38,18 @@
     "#1": {
       "0000": {
         "fixed": {
-          "file_version": "1.0.0.0",
-          "product_version": "1.0.0.0"
+          "file_version": "1.1.0.0",
+          "product_version": "1.1.0.0"
         },
         "info": {
           "0409": {
             "FileDescription": "MailHelper - IMAP mail archiver",
-            "FileVersion": "1.0.0.0",
+            "FileVersion": "1.1.0.0",
             "InternalName": "MailHelper",
             "LegalCopyright": "Written entirely by AI.",
             "OriginalFilename": "MailHelper.exe",
             "ProductName": "MailHelper",
-            "ProductVersion": "1.0.0.0"
+            "ProductVersion": "1.1.0.0"
           }
         }
       }

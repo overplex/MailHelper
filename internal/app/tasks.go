@@ -13,9 +13,10 @@ import (
 	"mailhelper/internal/winapi"
 )
 
-// batchSize is how many messages one iteration handles. For the copy job the batch bounds the work between progress
-// updates and the optional move that follows it; for the move job it is the
-// size of one COPY / \Deleted / EXPUNGE round.
+// batchSize is how many messages one iteration handles. For the copy job
+// the batch bounds the work between progress updates and the optional move
+// that follows it; for the move and delete jobs it is the size of one round
+// of server commands.
 const batchSize = 10
 
 type eventKind int
@@ -37,6 +38,21 @@ type event struct {
 	server  string
 	user    string
 	target  string
+}
+
+// job is everything a worker needs, captured on the UI thread before the
+// goroutine starts so that it never touches a control.
+type job struct {
+	task     task
+	cfg      imapc.Config
+	source   imapc.Folder
+	target   imapc.Folder
+	from, to *time.Time
+
+	// Copy only.
+	root      string
+	moveAfter bool
+	tr        *i18n.Strings
 }
 
 // post hands an event to the UI thread and wakes it up. The channel carries
@@ -70,6 +86,7 @@ func (a *App) handleEvent(e event) {
 		a.setProgress(a.barFor(e.task), 0, 0)
 
 		if a.closeRequested {
+			a.saveSettings()
 			winapi.DestroyWindow(a.hwnd)
 		}
 	}
@@ -81,6 +98,8 @@ func (a *App) barFor(t task) uintptr {
 		return a.pbCopy
 	case taskMove:
 		return a.pbMove
+	case taskDelete:
+		return a.pbDelete
 	}
 	return 0
 }
@@ -118,6 +137,9 @@ func (a *App) report(e event) {
 
 	case e.task == taskMove:
 		a.info(fmt.Sprintf(tr.MoveDone, e.done, e.target))
+
+	case e.task == taskDelete:
+		a.info(fmt.Sprintf(tr.DeleteDone, e.done, e.target))
 	}
 }
 
@@ -129,6 +151,9 @@ func (a *App) beginTask(t task) context.Context {
 	a.cancel = cancel
 	a.updateEnabled()
 	a.updateRunButtons()
+	if bar := a.barFor(t); bar != 0 {
+		a.setProgress(bar, 0, 0)
+	}
 	return ctx
 }
 
@@ -142,7 +167,7 @@ func (a *App) endTask() {
 	a.updateRunButtons()
 }
 
-// stopRunning asks the worker to stop at the next batch boundary.
+// stopRunning asks the worker to stop at the next message or batch boundary.
 func (a *App) stopRunning() {
 	if a.cancel != nil {
 		a.cancel()
@@ -150,13 +175,17 @@ func (a *App) stopRunning() {
 }
 
 // updateEnabled switches the input controls off while a job runs, leaving
-// only the Stop button of that job usable.
+// only the Stop button of that job usable. When idle, a date picker is
+// usable only while its filter is switched on.
 func (a *App) updateEnabled() {
 	idle := a.running == taskNone
 	for _, h := range a.interactive() {
 		winapi.EnableWindow(h, idle)
 	}
 	if idle {
+		for _, d := range a.dateFilters() {
+			winapi.EnableWindow(d.picker, winapi.Checked(d.check))
+		}
 		return
 	}
 	switch a.running {
@@ -164,6 +193,8 @@ func (a *App) updateEnabled() {
 		winapi.EnableWindow(a.btnCopyRun, true)
 	case taskMove:
 		winapi.EnableWindow(a.btnMoveRun, true)
+	case taskDelete:
+		winapi.EnableWindow(a.btnDeleteRun, true)
 	}
 }
 
@@ -210,151 +241,160 @@ func (a *App) startRefresh() {
 	}()
 }
 
-func (a *App) startCopy() {
+// prepare gathers what every server job needs: the mailbox settings, the
+// source folder and the period. ok is false when the user has been told
+// what is missing.
+func (a *App) prepare(t task, sourceCombo uintptr, noSource string, fromFilter, toFilter dateFilter) (j job, ok bool) {
 	cfg, problem := a.mailboxConfig()
 	if problem != "" {
 		a.warn(problem)
-		return
+		return job{}, false
 	}
+	source, found := a.selectedFolder(sourceCombo)
+	if !found {
+		a.warn(noSource)
+		return job{}, false
+	}
+	from, to, problem := a.period(fromFilter, toFilter)
+	if problem != "" {
+		a.warn(problem)
+		return job{}, false
+	}
+	return job{task: t, cfg: cfg, source: source, from: from, to: to}, true
+}
 
-	source, ok := a.selectedFolder(a.cbCopySrc)
+// target reads a target folder combo and checks it differs from the source.
+func (a *App) target(j *job, combo uintptr) bool {
+	target, ok := a.selectedFolder(combo)
 	if !ok {
-		a.warn(a.tr.ErrNoSource)
+		a.warn(a.tr.ErrNoTarget)
+		return false
+	}
+	if target.Raw == j.source.Raw {
+		a.warn(a.tr.ErrSameFolder)
+		return false
+	}
+	j.target = target
+	return true
+}
+
+func (a *App) startCopy() {
+	j, ok := a.prepare(taskCopy, a.cbCopySrc, a.tr.ErrNoSource, a.copyFrom, a.copyTo)
+	if !ok {
 		return
 	}
-
-	moveAfter := a.moveAfterCopy()
-	var target imapc.Folder
-	if moveAfter {
-		target, ok = a.selectedFolder(a.cbCopyDst)
-		if !ok {
-			a.warn(a.tr.ErrNoTarget)
-			return
-		}
-		if target.Raw == source.Raw {
-			a.warn(a.tr.ErrSameFolder)
-			return
-		}
+	j.moveAfter = a.moveAfterCopy()
+	if j.moveAfter && !a.target(&j, a.cbCopyDst) {
+		return
 	}
-
 	if a.saveDir == "" {
 		a.warn(a.tr.ErrNoSaveDir)
 		return
 	}
+	j.root, j.tr = a.saveDir, a.tr
 
-	from, to := dateOf(a.dtCopyFrom), dateOf(a.dtCopyTo)
-	if problem := a.checkDateOrder(from, to); problem != "" {
-		a.warn(problem)
-		return
-	}
-
-	root, tr := a.saveDir, a.tr
 	ctx := a.beginTask(taskCopy)
-	a.setProgress(a.pbCopy, 0, 0)
-
-	go a.copyJob(ctx, cfg, source.Raw, target.Raw, moveAfter, root, from, to, tr, source.IsSent())
+	go a.copyJob(ctx, j)
 }
 
 func (a *App) startMove() {
-	cfg, problem := a.mailboxConfig()
-	if problem != "" {
-		a.warn(problem)
-		return
-	}
-
-	source, ok := a.selectedFolder(a.cbMoveSrc)
-	if !ok {
-		a.warn(a.tr.ErrNoSource)
-		return
-	}
-	target, ok := a.selectedFolder(a.cbMoveDst)
-	if !ok {
-		a.warn(a.tr.ErrNoTarget)
-		return
-	}
-	if target.Raw == source.Raw {
-		a.warn(a.tr.ErrSameFolder)
-		return
-	}
-
-	from, to := dateOf(a.dtMoveFrom), dateOf(a.dtMoveTo)
-	if problem := a.checkDateOrder(from, to); problem != "" {
-		a.warn(problem)
+	j, ok := a.prepare(taskMove, a.cbMoveSrc, a.tr.ErrNoSource, a.moveFrom, a.moveTo)
+	if !ok || !a.target(&j, a.cbMoveDst) {
 		return
 	}
 
 	ctx := a.beginTask(taskMove)
-	a.setProgress(a.pbMove, 0, 0)
+	go a.serverJob(ctx, j, j.target.Name, func(s *imapc.Session, batch []uint32) error {
+		return s.Move(batch, j.target.Raw)
+	})
+}
 
-	go a.moveJob(ctx, cfg, source.Raw, target.Raw, target.Name, from, to)
+func (a *App) startDelete() {
+	j, ok := a.prepare(taskDelete, a.cbDeleteSrc, a.tr.ErrNoTarget, a.deleteFrom, a.deleteTo)
+	if !ok {
+		return
+	}
+	label := j.source.DisplayName(a.tr.FolderInbox)
+	if !a.confirm(fmt.Sprintf(a.tr.DeleteConfirm, label)) {
+		return
+	}
+
+	ctx := a.beginTask(taskDelete)
+	go a.serverJob(ctx, j, label, (*imapc.Session).Delete)
+}
+
+// openAndSearch connects, opens the source folder and lists the messages of
+// the period.
+func openAndSearch(j job) (*imapc.Session, []uint32, error) {
+	session, err := imapc.Open(j.cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, err := session.Select(j.source.Raw); err != nil {
+		session.Close()
+		return nil, nil, err
+	}
+	uids, err := session.SearchUIDs(j.from, j.to)
+	if err != nil {
+		session.Close()
+		return nil, nil, err
+	}
+	return session, uids, nil
 }
 
 // copyJob saves every message of the period into the chosen folder on disk,
 // ten at a time, and - when the box is ticked - moves each batch on the
-// server once its messages are safely written. fromSent carries down whether
-// the source is a folder of outgoing mail, which decides whether the message
-// folders are named after the sender or after the recipient.
-func (a *App) copyJob(ctx context.Context, cfg imapc.Config, sourceRaw, targetRaw string,
-	moveAfter bool, root string, from, to *time.Time, tr *i18n.Strings, fromSent bool) {
-
+// server once its messages are safely written. Whether the source is a
+// folder of outgoing mail decides whether the message folders are named
+// after the sender or after the recipient.
+func (a *App) copyJob(ctx context.Context, j job) {
 	done, total := 0, 0
 	finish := func(err error, stopped bool) {
 		a.post(event{
 			task: taskCopy, kind: evDone,
 			done: done, total: total, err: err, stopped: stopped,
-			target: root,
+			target: j.root,
 		})
 	}
 
-	session, err := imapc.Open(cfg)
+	session, uids, err := openAndSearch(j)
 	if err != nil {
 		finish(err, false)
 		return
 	}
 	defer session.Close()
 
-	if _, err := session.Select(sourceRaw); err != nil {
-		finish(err, false)
-		return
-	}
-	uids, err := session.SearchUIDs(from, to)
-	if err != nil {
-		finish(err, false)
-		return
-	}
-
 	total = len(uids)
 	a.post(event{task: taskCopy, kind: evProgress, done: 0, total: total})
 
+	fromSent := j.source.IsSent()
 	for start := 0; start < len(uids); start += batchSize {
-		end := start + batchSize
-		if end > len(uids) {
-			end = len(uids)
-		}
-		batch := uids[start:end]
+		batch := uids[start:min(start+batchSize, len(uids))]
 
+		saved := 0
 		for _, uid := range batch {
 			if ctx.Err() != nil {
-				finish(nil, true)
-				return
+				break
 			}
 			message, err := session.Fetch(uid)
 			if err != nil {
 				finish(err, false)
 				return
 			}
-			if _, err := mailsave.Save(root, message.Raw, message.InternalDate, tr, fromSent); err != nil {
+			if _, err := mailsave.Save(j.root, message.Raw, message.InternalDate, j.tr, fromSent); err != nil {
 				finish(err, false)
 				return
 			}
+			saved++
 			done++
 			a.post(event{task: taskCopy, kind: evProgress, done: done, total: total})
 		}
 
-		if moveAfter {
-			// Only messages already on disk are moved, so an interrupted
-			// run never loses one.
-			if err := session.Move(batch, targetRaw); err != nil {
+		// Only messages already on disk are moved - including those of a
+		// batch cut short by Stop - so an interrupted run never loses one
+		// and never leaves one behind to be copied a second time.
+		if j.moveAfter && saved > 0 {
+			if err := session.Move(batch[:saved], j.target.Raw); err != nil {
 				finish(err, false)
 				return
 			}
@@ -368,58 +408,42 @@ func (a *App) copyJob(ctx context.Context, cfg imapc.Config, sourceRaw, targetRa
 	finish(nil, false)
 }
 
-// moveJob moves the messages of the period from one server folder to
-// another with COPY, the \Deleted flag and EXPUNGE, ten per iteration. Any
-// error from the server stops the run immediately.
-func (a *App) moveJob(ctx context.Context, cfg imapc.Config, sourceRaw, targetRaw, targetName string,
-	from, to *time.Time) {
-
+// serverJob applies op to the messages of the period, ten per iteration:
+// the move job's COPY, \Deleted and EXPUNGE, or the delete job's \Deleted
+// and EXPUNGE. Any error from the server stops the run immediately. label
+// names the folder for the closing report.
+func (a *App) serverJob(ctx context.Context, j job, label string, op func(*imapc.Session, []uint32) error) {
 	done, total := 0, 0
 	finish := func(err error, stopped bool) {
 		a.post(event{
-			task: taskMove, kind: evDone,
+			task: j.task, kind: evDone,
 			done: done, total: total, err: err, stopped: stopped,
-			target: targetName,
+			target: label,
 		})
 	}
 
-	session, err := imapc.Open(cfg)
+	session, uids, err := openAndSearch(j)
 	if err != nil {
 		finish(err, false)
 		return
 	}
 	defer session.Close()
 
-	if _, err := session.Select(sourceRaw); err != nil {
-		finish(err, false)
-		return
-	}
-	uids, err := session.SearchUIDs(from, to)
-	if err != nil {
-		finish(err, false)
-		return
-	}
-
 	total = len(uids)
-	a.post(event{task: taskMove, kind: evProgress, done: 0, total: total})
+	a.post(event{task: j.task, kind: evProgress, done: 0, total: total})
 
 	for start := 0; start < len(uids); start += batchSize {
 		if ctx.Err() != nil {
 			finish(nil, true)
 			return
 		}
-		end := start + batchSize
-		if end > len(uids) {
-			end = len(uids)
-		}
-		batch := uids[start:end]
-
-		if err := session.Move(batch, targetRaw); err != nil {
+		batch := uids[start:min(start+batchSize, len(uids))]
+		if err := op(session, batch); err != nil {
 			finish(err, false)
 			return
 		}
 		done += len(batch)
-		a.post(event{task: taskMove, kind: evProgress, done: done, total: total})
+		a.post(event{task: j.task, kind: evProgress, done: done, total: total})
 	}
 
 	finish(nil, false)

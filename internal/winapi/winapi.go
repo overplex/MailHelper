@@ -21,6 +21,9 @@ var (
 	comctl32 = syscall.NewLazyDLL("comctl32.dll")
 	shell32  = syscall.NewLazyDLL("shell32.dll")
 	ole32    = syscall.NewLazyDLL("ole32.dll")
+	uxtheme  = syscall.NewLazyDLL("uxtheme.dll")
+	dwmapi   = syscall.NewLazyDLL("dwmapi.dll")
+	advapi32 = syscall.NewLazyDLL("advapi32.dll")
 
 	procGetModuleHandleW         = kernel32.NewProc("GetModuleHandleW")
 	procGetUserDefaultUILanguage = kernel32.NewProc("GetUserDefaultUILanguage")
@@ -59,13 +62,10 @@ var (
 	procEndPaint            = user32.NewProc("EndPaint")
 	procFillRect            = user32.NewProc("FillRect")
 	procDrawTextW           = user32.NewProc("DrawTextW")
-	procSetFocus            = user32.NewProc("SetFocus")
-	procGetFocus            = user32.NewProc("GetFocus")
 	procIsWindowEnabled     = user32.NewProc("IsWindowEnabled")
 	procMonitorFromWindow   = user32.NewProc("MonitorFromWindow")
 	procGetMonitorInfoW     = user32.NewProc("GetMonitorInfoW")
 	procCreateIconIndirect  = user32.NewProc("CreateIconIndirect")
-	procSetCursor           = user32.NewProc("SetCursor")
 
 	// Per-monitor DPI entry points; every call site checks Find first and
 	// falls back to the system-DPI equivalent on older Windows.
@@ -79,7 +79,6 @@ var (
 	procSelectObject       = gdi32.NewProc("SelectObject")
 	procDeleteObject       = gdi32.NewProc("DeleteObject")
 	procRoundRect          = gdi32.NewProc("RoundRect")
-	procRectangle          = gdi32.NewProc("Rectangle")
 	procSetBkMode          = gdi32.NewProc("SetBkMode")
 	procSetBkColor         = gdi32.NewProc("SetBkColor")
 	procSetTextColor       = gdi32.NewProc("SetTextColor")
@@ -100,51 +99,48 @@ var (
 
 	procCoInitializeEx = ole32.NewProc("CoInitializeEx")
 	procCoTaskMemFree  = ole32.NewProc("CoTaskMemFree")
+
+	procGetTextExtentPoint32W = gdi32.NewProc("GetTextExtentPoint32W")
+	procRedrawWindow          = user32.NewProc("RedrawWindow")
+	procSetWindowTheme        = uxtheme.NewProc("SetWindowTheme")
+	procDwmSetWindowAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
+	procRegGetValueW          = advapi32.NewProc("RegGetValueW")
+	procSetWindowLongPtrW     = user32.NewProc("SetWindowLongPtrW")
+	procCallWindowProcW       = user32.NewProc("CallWindowProcW")
+	procBitBlt                = gdi32.NewProc("BitBlt")
 )
 
 // -------------------------------------------------------------- Constants
 
 const (
-	WS_OVERLAPPED   = 0x00000000
-	WS_CAPTION      = 0x00C00000
-	WS_SYSMENU      = 0x00080000
-	WS_MINIMIZEBOX  = 0x00020000
-	WS_CHILD        = 0x40000000
-	WS_VISIBLE      = 0x10000000
-	WS_TABSTOP      = 0x00010000
-	WS_GROUP        = 0x00020000
-	WS_BORDER       = 0x00800000
-	WS_VSCROLL      = 0x00200000
-	WS_CLIPCHILDREN = 0x02000000
-	WS_CLIPSIBLINGS = 0x04000000
-	WS_DISABLED     = 0x08000000
+	WS_OVERLAPPED  = 0x00000000
+	WS_CAPTION     = 0x00C00000
+	WS_SYSMENU     = 0x00080000
+	WS_MINIMIZEBOX = 0x00020000
+	WS_CHILD       = 0x40000000
+	WS_VISIBLE     = 0x10000000
+	WS_TABSTOP     = 0x00010000
+	WS_BORDER      = 0x00800000
+	WS_VSCROLL     = 0x00200000
 
 	WS_EX_CONTROLPARENT = 0x00010000
-	WS_EX_CLIENTEDGE    = 0x00000200
-	WS_EX_COMPOSITED    = 0x02000000
 
 	CW_USEDEFAULT = ^uintptr(0x7FFFFFFF) // 0x80000000 read as a signed int32
 
 	// Button styles.
-	BS_PUSHBUTTON    = 0x00000000
-	BS_DEFPUSHBUTTON = 0x00000001
-	BS_AUTOCHECKBOX  = 0x00000003
-	BS_GROUPBOX      = 0x00000007
-	BS_MULTILINE     = 0x00002000
+	BS_PUSHBUTTON   = 0x00000000
+	BS_AUTOCHECKBOX = 0x00000003
+	BS_MULTILINE    = 0x00002000
 
 	// Edit styles.
 	ES_LEFT        = 0x0000
 	ES_AUTOHSCROLL = 0x0080
 	ES_PASSWORD    = 0x0020
 	ES_NUMBER      = 0x2000
-	ES_READONLY    = 0x0800
 
 	// Static styles.
-	SS_LEFT         = 0x00000000
-	SS_CENTERIMAGE  = 0x00000200
-	SS_PATHELLIPSIS = 0x00008000
-	SS_ENDELLIPSIS  = 0x00004000
-	SS_NOTIFY       = 0x00000100
+	SS_LEFT        = 0x00000000
+	SS_CENTERIMAGE = 0x00000200
 
 	// Combo box styles.
 	CBS_DROPDOWNLIST = 0x0003
@@ -152,28 +148,18 @@ const (
 
 	// Date/time picker styles.
 	DTS_SHORTDATEFORMAT = 0x0000
-	DTS_UPDOWN          = 0x0001
-	DTS_SHOWNONE        = 0x0002
-	DTS_RIGHTALIGN      = 0x0020
 
 	// Messages.
-	WM_CREATE          = 0x0001
 	WM_DESTROY         = 0x0002
-	WM_SIZE            = 0x0005
-	WM_SETFOCUS        = 0x0007
 	WM_PAINT           = 0x000F
 	WM_CLOSE           = 0x0010
 	WM_ERASEBKGND      = 0x0014
 	WM_SETFONT         = 0x0030
-	WM_GETFONT         = 0x0031
 	WM_SETICON         = 0x0080
-	WM_NOTIFY          = 0x004E
 	WM_COMMAND         = 0x0111
-	WM_SETCURSOR       = 0x0020
 	WM_CTLCOLOREDIT    = 0x0133
 	WM_CTLCOLORLISTBOX = 0x0134
 	WM_CTLCOLORBTN     = 0x0135
-	WM_CTLCOLORDLG     = 0x0136
 	WM_CTLCOLORSTATIC  = 0x0138
 	WM_DPICHANGED      = 0x02E0
 	WM_APP             = 0x8000
@@ -184,29 +170,20 @@ const (
 
 	CB_ADDSTRING    = 0x0143
 	CB_GETCURSEL    = 0x0147
-	CB_GETLBTEXT    = 0x0148
-	CB_GETLBTEXTLEN = 0x0149
 	CB_RESETCONTENT = 0x014B
 	CB_SETCURSEL    = 0x014E
 
-	EM_SETSEL = 0x00B1
-
 	DTM_FIRST         = 0x1000
 	DTM_GETSYSTEMTIME = DTM_FIRST + 1
-	DTM_SETSYSTEMTIME = DTM_FIRST + 2
-	DTM_SETFORMATW    = DTM_FIRST + 50
 
 	GDT_VALID = 0
-	GDT_NONE  = 1
 
 	// Notification codes.
-	BN_CLICKED         = 0
-	EN_CHANGE          = 0x0300
-	CBN_SELCHANGE      = 1
-	DTN_DATETIMECHANGE = -759 // DTN_FIRST2 (-753) - 6
+	BN_CLICKED    = 0
+	EN_CHANGE     = 0x0300
+	CBN_SELCHANGE = 1
 
-	BST_UNCHECKED = 0
-	BST_CHECKED   = 1
+	BST_CHECKED = 1
 
 	// SetWindowPos flags.
 	SWP_NOSIZE     = 0x0001
@@ -218,14 +195,11 @@ const (
 	SW_HIDE = 0
 
 	IDC_ARROW = 32512
-	IDC_WAIT  = 32514
 
 	TRANSPARENT = 1
-	OPAQUE      = 2
 
 	DT_LEFT         = 0x00000000
 	DT_CENTER       = 0x00000001
-	DT_RIGHT        = 0x00000002
 	DT_VCENTER      = 0x00000004
 	DT_SINGLELINE   = 0x00000020
 	DT_END_ELLIPSIS = 0x00008000
@@ -240,15 +214,12 @@ const (
 
 	// MessageBox flags.
 	MB_OK              = 0x00000000
-	MB_OKCANCEL        = 0x00000001
 	MB_YESNO           = 0x00000004
 	MB_ICONERROR       = 0x00000010
-	MB_ICONQUESTION    = 0x00000020
 	MB_ICONWARNING     = 0x00000030
 	MB_ICONINFORMATION = 0x00000040
-	MB_TOPMOST         = 0x00040000
+	MB_DEFBUTTON2      = 0x00000100
 
-	IDOK  = 1
 	IDYES = 6
 
 	// InitCommonControlsEx classes.
@@ -259,15 +230,12 @@ const (
 	// SHBrowseForFolder flags.
 	BIF_RETURNONLYFSDIRS = 0x00000001
 	BIF_NEWDIALOGSTYLE   = 0x00000040
-	BIF_EDITBOX          = 0x00000010
 
 	// SHBrowseForFolder callback messages.
 	BFFM_INITIALIZED   = 1
 	BFFM_SETSELECTIONW = 0x0400 + 103 // WM_USER + 103
 
 	// GetWindowLongPtr indices.
-	GWLP_WNDPROC  = -4
-	GWLP_USERDATA = -21
 
 	MONITOR_DEFAULTTONEAREST = 2
 )
@@ -325,13 +293,6 @@ type SystemTime struct {
 	Minute       uint16
 	Second       uint16
 	Milliseconds uint16
-}
-
-type NMHDR struct {
-	HwndFrom uintptr
-	IDFrom   uintptr
-	Code     int32
-	_        int32
 }
 
 type InitCommonControlsExStruct struct {
@@ -396,10 +357,12 @@ func UTF16(s string) *uint16 {
 
 // StructFromLParam reinterprets an LPARAM as a pointer to a structure
 // Windows owns. A window procedure has no other way to read the messages it
-// is handed, and the memory stays alive for the duration of the call; the
-// conversion is confined to this one place.
+// is handed, and the memory stays alive for the duration of the call. The
+// memory belongs to Windows rather than the Go heap, so the garbage
+// collector has nothing to track; the value is reinterpreted through its
+// address, the form go vet accepts for such a conversion.
 func StructFromLParam[T any](lParam uintptr) *T {
-	return (*T)(unsafe.Pointer(lParam)) //nolint:govet // memory owned by Windows, not the Go heap
+	return *(**T)(unsafe.Pointer(&lParam))
 }
 
 func RGB(r, g, b byte) uintptr {
@@ -501,8 +464,6 @@ func LoadCursor(id uintptr) uintptr {
 	return h
 }
 
-func SetCursor(h uintptr) { procSetCursor.Call(h) }
-
 func SendMessage(hwnd, msg, wParam, lParam uintptr) uintptr {
 	r, _, _ := procSendMessageW.Call(hwnd, msg, wParam, lParam)
 	return r
@@ -580,13 +541,6 @@ func DrawText(hdc uintptr, text string, r *Rect, format uint32) {
 		uintptr(unsafe.Pointer(r)), uintptr(format))
 }
 
-func SetFocus(hwnd uintptr) { procSetFocus.Call(hwnd) }
-
-func GetFocus() uintptr {
-	h, _, _ := procGetFocus.Call()
-	return h
-}
-
 func CreateSolidBrush(color uintptr) uintptr {
 	h, _, _ := procCreateSolidBrush.Call(color)
 	return h
@@ -606,10 +560,6 @@ func DeleteObject(obj uintptr) { procDeleteObject.Call(obj) }
 
 func RoundRect(hdc uintptr, l, t, r, b, rw, rh int32) {
 	procRoundRect.Call(hdc, uintptr(l), uintptr(t), uintptr(r), uintptr(b), uintptr(rw), uintptr(rh))
-}
-
-func Rectangle(hdc uintptr, l, t, r, b int32) {
-	procRectangle.Call(hdc, uintptr(l), uintptr(t), uintptr(r), uintptr(b))
 }
 
 func SetBkMode(hdc uintptr, mode int32)   { procSetBkMode.Call(hdc, uintptr(mode)) }
@@ -754,19 +704,11 @@ func SetChecked(hwnd uintptr, on bool) {
 	SendMessage(hwnd, BM_SETCHECK, boolToUintptr(on), 0)
 }
 
-// DateGet reads a date/time picker, reporting ok=false when the control is
-// in its "no date" state - which is how the user switches the filter off.
+// DateGet reads a date/time picker. ok is false when the control holds no
+// valid date.
 func DateGet(hwnd uintptr) (st SystemTime, ok bool) {
 	r := SendMessage(hwnd, DTM_GETSYSTEMTIME, 0, uintptr(unsafe.Pointer(&st)))
 	return st, r == GDT_VALID
-}
-
-func DateSetNone(hwnd uintptr) {
-	SendMessage(hwnd, DTM_SETSYSTEMTIME, GDT_NONE, 0)
-}
-
-func DateSet(hwnd uintptr, st SystemTime) {
-	SendMessage(hwnd, DTM_SETSYSTEMTIME, GDT_VALID, uintptr(unsafe.Pointer(&st)))
 }
 
 // ------------------------------------------------------------ Folder pick
@@ -862,4 +804,164 @@ func NewIconFromBGRA(pix []byte, size int32) uintptr {
 	info := IconInfo{FIcon: 1, HbmMask: hbmMask, HbmColor: hbm}
 	hIcon, _, _ := procCreateIconIndirect.Call(uintptr(unsafe.Pointer(&info)))
 	return hIcon
+}
+
+// ------------------------------------------------------------------ Theming
+
+// SetWindowTheme makes a control draw itself with the named visual style
+// class, such as "DarkMode_Explorer". An empty name restores the default.
+func SetWindowTheme(hwnd uintptr, name string) {
+	if procSetWindowTheme.Find() != nil {
+		return
+	}
+	var p *uint16
+	if name != "" {
+		p = UTF16(name)
+	}
+	procSetWindowTheme.Call(hwnd, uintptr(unsafe.Pointer(p)), 0)
+}
+
+// SetDarkTitleBar asks the window manager to draw the caption and frame in
+// dark colours. Attribute 20 is DWMWA_USE_IMMERSIVE_DARK_MODE; Windows 10
+// builds before 20H1 knew the same switch as attribute 19.
+func SetDarkTitleBar(hwnd uintptr, dark bool) {
+	if procDwmSetWindowAttribute.Find() != nil {
+		return
+	}
+	value := int32(0)
+	if dark {
+		value = 1
+	}
+	for _, attr := range []uintptr{20, 19} {
+		hr, _, _ := procDwmSetWindowAttribute.Call(hwnd, attr, uintptr(unsafe.Pointer(&value)), unsafe.Sizeof(value))
+		if hr == 0 {
+			return
+		}
+	}
+}
+
+// RedrawAll repaints the window, its frame and every child at once.
+func RedrawAll(hwnd uintptr) {
+	const (
+		rdwInvalidate  = 0x0001
+		rdwErase       = 0x0004
+		rdwAllChildren = 0x0080
+		rdwUpdateNow   = 0x0100
+		rdwFrame       = 0x0400
+	)
+	procRedrawWindow.Call(hwnd, 0, 0, rdwInvalidate|rdwErase|rdwAllChildren|rdwUpdateNow|rdwFrame)
+}
+
+// SystemPrefersDark reports whether Windows is set to show applications in
+// dark mode. It answers false when the setting cannot be read, which is the
+// case on Windows versions that predate the switch.
+func SystemPrefersDark() bool {
+	const (
+		hkeyCurrentUser = 0x80000001
+		rrfRtRegDword   = 0x00000010
+	)
+	var value, size uint32 = 0, 4
+	r, _, _ := procRegGetValueW.Call(hkeyCurrentUser,
+		uintptr(unsafe.Pointer(UTF16(`Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`))),
+		uintptr(unsafe.Pointer(UTF16("AppsUseLightTheme"))),
+		rrfRtRegDword, 0,
+		uintptr(unsafe.Pointer(&value)), uintptr(unsafe.Pointer(&size)))
+	return r == 0 && value == 0
+}
+
+// TextWidth measures how many physical pixels s takes in the given font.
+func TextWidth(hwnd, font uintptr, s string) int32 {
+	if s == "" {
+		return 0
+	}
+	hdc, _, _ := procGetDC.Call(hwnd)
+	if hdc == 0 {
+		return 0
+	}
+	defer procReleaseDC.Call(hwnd, hdc)
+	old := SelectObject(hdc, font)
+	defer SelectObject(hdc, old)
+
+	text, err := syscall.UTF16FromString(s)
+	if err != nil || len(text) < 2 {
+		return 0
+	}
+	var size struct{ CX, CY int32 }
+	procGetTextExtentPoint32W.Call(hdc, uintptr(unsafe.Pointer(&text[0])), uintptr(len(text)-1),
+		uintptr(unsafe.Pointer(&size)))
+	return size.CX
+}
+
+// SubclassWindow replaces a window's procedure and returns the previous one,
+// which the new procedure hands every message it does not handle itself.
+func SubclassWindow(hwnd, proc uintptr) uintptr {
+	const gwlpWndProc = ^uintptr(3) // GWLP_WNDPROC is -4
+	old, _, _ := procSetWindowLongPtrW.Call(hwnd, gwlpWndProc, proc)
+	return old
+}
+
+// CallWindowProc passes a message on to a window procedure saved by
+// SubclassWindow.
+func CallWindowProc(proc, hwnd, msg, wParam, lParam uintptr) uintptr {
+	r, _, _ := procCallWindowProcW.Call(proc, hwnd, msg, wParam, lParam)
+	return r
+}
+
+// Canvas is an off-screen 32-bit top-down bitmap with a device context, so
+// that a control can be painted into memory, recoloured and then copied to
+// the screen in one go.
+type Canvas struct {
+	DC     uintptr
+	Pixels []byte // BGRA, Width*Height*4 bytes
+	Width  int32
+	Height int32
+	bitmap uintptr
+	old    uintptr
+}
+
+// NewCanvas creates a canvas compatible with hdc. It returns nil when GDI
+// is out of resources; the caller then paints directly.
+func NewCanvas(hdc uintptr, width, height int32) *Canvas {
+	if width <= 0 || height <= 0 {
+		return nil
+	}
+	dc, _, _ := procCreateCompatibleDC.Call(hdc)
+	if dc == 0 {
+		return nil
+	}
+	bi := BitmapInfoHeader{
+		Size:     uint32(unsafe.Sizeof(BitmapInfoHeader{})),
+		Width:    width,
+		Height:   -height, // negative height means a top-down bitmap
+		Planes:   1,
+		BitCount: 32,
+	}
+	var bits unsafe.Pointer
+	bmp, _, _ := procCreateDIBSection.Call(dc, uintptr(unsafe.Pointer(&bi)), 0,
+		uintptr(unsafe.Pointer(&bits)), 0, 0)
+	if bmp == 0 {
+		procDeleteDC.Call(dc)
+		return nil
+	}
+	return &Canvas{
+		DC:     dc,
+		Pixels: unsafe.Slice((*byte)(bits), int(width)*int(height)*4),
+		Width:  width,
+		Height: height,
+		bitmap: bmp,
+		old:    SelectObject(dc, bmp),
+	}
+}
+
+// CopyTo copies the canvas onto hdc at the origin.
+func (c *Canvas) CopyTo(hdc uintptr) {
+	const srcCopy = 0x00CC0020
+	procBitBlt.Call(hdc, 0, 0, uintptr(c.Width), uintptr(c.Height), c.DC, 0, 0, srcCopy)
+}
+
+// Release frees the bitmap and the device context.
+func (c *Canvas) Release() {
+	SelectObject(c.DC, c.old)
+	DeleteObject(c.bitmap)
+	procDeleteDC.Call(c.DC)
 }

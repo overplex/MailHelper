@@ -168,3 +168,18 @@ func (s *Session) Move(uids []uint32, destRaw string) error {
 		return c.Expunge(uids)
 	})
 }
+
+// Delete flags one batch of UIDs \Deleted and expunges them, which removes
+// the messages from the mailbox for good. If the link drops midway the batch
+// is retried; flagging and expunging a message twice is harmless.
+func (s *Session) Delete(uids []uint32) error {
+	if len(uids) == 0 {
+		return nil
+	}
+	return s.run(func(c *Client) error {
+		if err := c.MarkDeleted(uids); err != nil {
+			return err
+		}
+		return c.Expunge(uids)
+	})
+}

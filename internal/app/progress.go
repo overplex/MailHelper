@@ -14,9 +14,6 @@ import (
 // application's control.
 
 func (a *App) setProgress(bar uintptr, done, total int) {
-	if bar == 0 {
-		return
-	}
 	state, ok := a.progress[bar]
 	if !ok {
 		return
@@ -60,35 +57,25 @@ func (a *App) paintProgress(hwnd, hdc uintptr) {
 	radius := a.px(8)
 
 	// The rounded corners leave pixels the shape never covers, so start from
-	// the window background rather than whatever the DC happens to hold.
-	winapi.FillRect(hdc, &r, a.brushWindow)
+	// the background the bar sits on rather than whatever the DC holds.
+	_, background := a.background(hwnd)
+	winapi.FillRect(hdc, &r, background)
 
-	drawRounded := func(right int32, fill, edge uintptr) {
-		brush := winapi.CreateSolidBrush(fill)
-		pen := winapi.CreatePen(0 /* PS_SOLID */, 1, edge)
-		oldBrush := winapi.SelectObject(hdc, brush)
-		oldPen := winapi.SelectObject(hdc, pen)
-		winapi.RoundRect(hdc, r.Left, r.Top, right, r.Bottom, radius, radius)
-		winapi.SelectObject(hdc, oldBrush)
-		winapi.SelectObject(hdc, oldPen)
-		winapi.DeleteObject(brush)
-		winapi.DeleteObject(pen)
+	fill := a.pal.fill
+	if state.danger {
+		fill = a.pal.dangerFill
 	}
-
-	drawRounded(r.Right, colTrack, colTrackEdge)
+	fillRounded(hdc, r, radius, a.pal.track, a.pal.trackEdge)
 
 	filled := r.Left
 	if state.total > 0 && state.done > 0 {
-		filled = r.Left + int32(float64(r.Width())*float64(state.done)/float64(state.total))
-		if filled > r.Right {
-			filled = r.Right
-		}
+		filled = min(r.Left+int32(float64(r.Width())*float64(state.done)/float64(state.total)), r.Right)
 		// Below a couple of radii the rounded rectangle degenerates into a
 		// sliver, so give the first sliver of progress a visible width.
-		if filled < r.Left+radius*2 {
-			filled = r.Left + radius*2
-		}
-		drawRounded(filled, colFill, colFill)
+		filled = max(filled, r.Left+radius*2)
+		bar := r
+		bar.Right = filled
+		fillRounded(hdc, bar, radius, fill, fill)
 	}
 
 	if state.total == 0 && state.done == 0 {
@@ -100,15 +87,15 @@ func (a *App) paintProgress(hwnd, hdc uintptr) {
 	oldFont := winapi.SelectObject(hdc, a.font)
 
 	// The label spans the boundary between the filled and empty parts, so it
-	// is drawn twice through complementary clips: white on the fill, dark on
-	// the track.
+	// is drawn twice through complementary clips: light on the fill, the
+	// text colour on the track.
 	const format = winapi.DT_CENTER | winapi.DT_VCENTER | winapi.DT_SINGLELINE
 	for _, half := range []struct {
 		left, right int32
 		color       uintptr
 	}{
-		{r.Left, filled, colOnFill},
-		{filled, r.Right, colText},
+		{r.Left, filled, a.pal.onFill},
+		{filled, r.Right, a.pal.text},
 	} {
 		if half.right <= half.left {
 			continue

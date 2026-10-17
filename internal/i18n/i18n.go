@@ -20,8 +20,29 @@ const Count = 2
 // deliberately not translated: each is written in its own language.
 var Names = [Count]string{"English", "Русский"}
 
-// LANG_RUSSIAN, the primary language identifier Windows uses for every
-// Russian locale.
+// codes are the identifiers a language is stored under in the settings.
+var codes = [Count]string{"en", "ru"}
+
+// Code returns the identifier the language is stored under.
+func (l Lang) Code() string {
+	if l < 0 || int(l) >= Count {
+		return codes[EN]
+	}
+	return codes[l]
+}
+
+// FromCode is the reverse of Code. ok is false for an unknown identifier.
+func FromCode(code string) (l Lang, ok bool) {
+	for i, c := range codes {
+		if c == code {
+			return Lang(i), true
+		}
+	}
+	return EN, false
+}
+
+// langRussian is LANG_RUSSIAN, the primary language identifier Windows uses
+// for every Russian locale.
 const langRussian = 0x19
 
 // FromWindowsLangID picks the language to start in for a Windows LANGID.
@@ -40,7 +61,10 @@ func FromWindowsLangID(langID uint16) Lang {
 type Strings struct {
 	AppTitle string
 
-	Language string
+	Language   string
+	Theme      string
+	ThemeLight string
+	ThemeDark  string
 
 	GroupMailbox string
 	Email        string
@@ -53,6 +77,7 @@ type Strings struct {
 
 	GroupCopy     string
 	GroupMove     string
+	GroupDelete   string
 	SourceFolder  string
 	TargetFolder  string
 	FolderInbox   string
@@ -61,7 +86,6 @@ type Strings struct {
 	NoSaveDir     string
 	DateFrom      string
 	DateTo        string
-	ClearDate     string
 	Start         string
 	Stop          string
 	BrowseTitle   string
@@ -69,6 +93,7 @@ type Strings struct {
 	CapInfo    string
 	CapError   string
 	CapWarning string
+	CapConfirm string
 
 	ConnOK   string
 	ConnFail string
@@ -89,7 +114,12 @@ type Strings struct {
 	NothingToDo string
 	CopyDone    string
 	MoveDone    string
+	DeleteDone  string
 	Failed      string
+
+	DeleteConfirm string
+
+	ErrSaveSettings string
 
 	// Labels used inside the generated content.html file.
 	HTMLSender      string
@@ -104,7 +134,10 @@ var table = [Count]Strings{
 	EN: {
 		AppTitle: "MailHelper",
 
-		Language: "Language",
+		Language:   "Language",
+		Theme:      "Theme",
+		ThemeLight: "Light",
+		ThemeDark:  "Dark",
 
 		GroupMailbox: "Mailbox",
 		Email:        "E-mail",
@@ -117,6 +150,7 @@ var table = [Count]Strings{
 
 		GroupCopy:     "Copy to a folder on disk",
 		GroupMove:     "Move from folder to folder on the server",
+		GroupDelete:   "Delete messages",
 		SourceFolder:  "Source folder on the server",
 		TargetFolder:  "Target folder on the server",
 		FolderInbox:   "Inbox",
@@ -125,7 +159,6 @@ var table = [Count]Strings{
 		NoSaveDir:     "(no folder chosen)",
 		DateFrom:      "From date",
 		DateTo:        "To date",
-		ClearDate:     "Clear the date",
 		Start:         "Start",
 		Stop:          "Stop",
 		BrowseTitle:   "Select the folder messages will be saved into",
@@ -133,6 +166,7 @@ var table = [Count]Strings{
 		CapInfo:    "MailHelper",
 		CapError:   "Error",
 		CapWarning: "Check the settings",
+		CapConfirm: "Confirmation",
 
 		ConnOK:   "Connected successfully.\n\nServer: %s\nUser: %s",
 		ConnFail: "Could not connect.\n\n%s",
@@ -153,11 +187,16 @@ var table = [Count]Strings{
 		NothingToDo: "No messages match the selected period.",
 		CopyDone:    "Copying finished.\n\nMessages saved: %d\nFolder: %s",
 		MoveDone:    "Moving finished.\n\nMessages moved: %d\nTarget folder: %s",
+		DeleteDone:  "Deleting finished.\n\nMessages deleted: %d\nFolder: %s",
 		Failed:      "The operation stopped with an error.\n\n%s\n\nMessages processed: %d of %d",
 
-		HTMLSender:      "Sender",
+		DeleteConfirm: "Are you sure? The messages will be deleted from your mailbox.\n\nFolder: %s",
+
+		ErrSaveSettings: "Could not save the settings.\n\n%s",
+
+		HTMLSender:      "Sender name",
 		HTMLSenderEmail: "Sender e-mail",
-		HTMLReceived:    "Received",
+		HTMLReceived:    "Date and time received",
 		HTMLSubject:     "Subject",
 		HTMLAttachments: "Attachments",
 		HTMLNoBody:      "(the message has no text body)",
@@ -165,7 +204,10 @@ var table = [Count]Strings{
 	RU: {
 		AppTitle: "MailHelper",
 
-		Language: "Язык",
+		Language:   "Язык",
+		Theme:      "Тема",
+		ThemeLight: "Светлая",
+		ThemeDark:  "Тёмная",
 
 		GroupMailbox: "Почтовый ящик",
 		Email:        "E-mail",
@@ -178,6 +220,7 @@ var table = [Count]Strings{
 
 		GroupCopy:     "Копировать в папку на диск",
 		GroupMove:     "Перенести из папки в папку на почте",
+		GroupDelete:   "Удалить письма",
 		SourceFolder:  "Исходная папка на почте",
 		TargetFolder:  "Целевая папка на почте",
 		FolderInbox:   "Входящие",
@@ -186,7 +229,6 @@ var table = [Count]Strings{
 		NoSaveDir:     "(папка не выбрана)",
 		DateFrom:      "С даты",
 		DateTo:        "До даты",
-		ClearDate:     "Сбросить дату",
 		Start:         "Запустить",
 		Stop:          "Остановить",
 		BrowseTitle:   "Выберите папку, в которую будут сохранены письма",
@@ -194,6 +236,7 @@ var table = [Count]Strings{
 		CapInfo:    "MailHelper",
 		CapError:   "Ошибка",
 		CapWarning: "Проверьте настройки",
+		CapConfirm: "Подтверждение",
 
 		ConnOK:   "Подключение выполнено успешно.\n\nСервер: %s\nПользователь: %s",
 		ConnFail: "Не удалось подключиться.\n\n%s",
@@ -214,7 +257,12 @@ var table = [Count]Strings{
 		NothingToDo: "За выбранный период писем не найдено.",
 		CopyDone:    "Копирование завершено.\n\nСохранено писем: %d\nПапка: %s",
 		MoveDone:    "Перенос завершён.\n\nПеренесено писем: %d\nЦелевая папка: %s",
+		DeleteDone:  "Удаление завершено.\n\nУдалено писем: %d\nПапка: %s",
 		Failed:      "Операция остановлена из-за ошибки.\n\n%s\n\nОбработано писем: %d из %d",
+
+		DeleteConfirm: "Вы уверены? Письма будут удалены в вашем почтовом ящике.\n\nПапка: %s",
+
+		ErrSaveSettings: "Не удалось сохранить настройки.\n\n%s",
 
 		HTMLSender:      "Имя отправителя",
 		HTMLSenderEmail: "E-mail отправителя",

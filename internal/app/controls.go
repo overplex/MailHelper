@@ -3,13 +3,16 @@
 package app
 
 import (
+	"math"
+
 	"mailhelper/internal/i18n"
 	"mailhelper/internal/winapi"
 )
 
-// Control identifiers. Only the interactive controls need one.
+// Control identifiers. Only the controls that report something need one.
 const (
 	idLang = 100 + iota
+	idTheme
 	idEmail
 	idPassword
 	idServer
@@ -18,22 +21,23 @@ const (
 	idTest
 	idRefresh
 
+	idDeleteSrc
+	idDeleteFrom
+	idDeleteTo
+	idDeleteRun
+
 	idCopySrc
 	idMoveAfter
 	idCopyDst
 	idSaveDir
 	idCopyFrom
-	idCopyFromX
 	idCopyTo
-	idCopyToX
 	idCopyRun
 
 	idMoveSrc
 	idMoveDst
 	idMoveFrom
-	idMoveFromX
 	idMoveTo
-	idMoveToX
 	idMoveRun
 )
 
@@ -45,28 +49,35 @@ const (
 	margin   = 12
 	gapH     = 12
 	gapV     = 12
+	topY     = 10
+	topRowH  = 34
 	rowH     = 24
 	rowPitch = 30
 	labelW   = 168
 	labelGap = 8
 
 	groupInset  = 14
-	groupTop    = 24
+	groupTop    = 34 // room for the panel caption above the first row
 	groupBottom = 14
+	captionTop  = 8
+	panelRadius = 10
 
 	btnH      = 28
-	runPitch  = 38
+	btnPad    = 18 // space between a button's text and its edges
+	btnMinW   = 90
+	runGap    = 10 // between the last field and the progress row
 	chkH      = 34
 	chkPitch  = 38
 	savePitch = 34
-	pbH       = 26
 	dtW       = 170
-	clearW    = 28
-	clearGap  = 6
+	langW     = 150
 
 	comboDrop = 220 // how far a combo box list may unfold
 
 	groupW = (winW - 2*margin - gapH) / 2
+	ctlOff = labelW + labelGap // where the input column starts inside a panel
+
+	mailboxH = groupTop + 5*rowPitch + 4 + btnH + groupBottom
 )
 
 const (
@@ -76,6 +87,22 @@ const (
 	classCombo  = "COMBOBOX"
 	classDate   = "SysDateTimePick32"
 )
+
+// panelID names the four panels the window is divided into.
+type panelID int
+
+const (
+	pnlMailbox panelID = iota
+	pnlDelete
+	pnlCopy
+	pnlMove
+	panelCount
+)
+
+// panelRect is where a panel sits, in logical pixels.
+type panelRect struct {
+	x, y, w, h int32
+}
 
 // child creates one control. Position and size are set later by layoutAll.
 func (a *App) child(class string, style uint32, id int) uintptr {
@@ -92,10 +119,6 @@ func (a *App) label() uintptr {
 	return a.child(classStatic, winapi.SS_LEFT|winapi.SS_CENTERIMAGE, 0)
 }
 
-func (a *App) group() uintptr {
-	return a.child(classButton, winapi.BS_GROUPBOX, 0)
-}
-
 func (a *App) edit(id int, extra uint32) uintptr {
 	return a.child(classEdit,
 		winapi.WS_TABSTOP|winapi.WS_BORDER|winapi.ES_LEFT|winapi.ES_AUTOHSCROLL|extra, id)
@@ -110,98 +133,132 @@ func (a *App) button(id int) uintptr {
 	return a.child(classButton, winapi.WS_TABSTOP|winapi.BS_PUSHBUTTON, id)
 }
 
-func (a *App) datePicker(id int) uintptr {
-	// DTS_SHOWNONE gives the control its own "date set / not set" checkbox,
-	// so an empty date is a real state rather than a blank the user has to
-	// guess at. The X button next to it clears the date in one click.
-	h := a.child(classDate,
-		winapi.WS_TABSTOP|winapi.DTS_SHORTDATEFORMAT|winapi.DTS_SHOWNONE, id)
-	winapi.DateSetNone(h)
-	return h
+func (a *App) checkbox(id int, extra uint32) uintptr {
+	return a.child(classButton, winapi.WS_TABSTOP|winapi.BS_AUTOCHECKBOX|extra, id)
 }
 
-func (a *App) progressBar() uintptr {
+// dateFilter creates a checkbox that switches the filter on and the picker
+// it enables. The picker has no checkbox of its own: the one DTS_SHOWNONE
+// draws is stretched to the height of the control on Windows 11, while a
+// regular checkbox looks the same as everywhere else.
+func (a *App) dateFilter(id int) dateFilter {
+	d := dateFilter{
+		check:  a.checkbox(id, 0),
+		picker: a.child(classDate, winapi.WS_TABSTOP|winapi.DTS_SHORTDATEFORMAT, 0),
+	}
+	subclassPicker(d.picker)
+	return d
+}
+
+func (a *App) progressBar(danger bool) uintptr {
 	h := a.child(progressClass, 0, 0)
-	a.progress[h] = &progressState{}
+	a.progress[h] = &progressState{danger: danger}
 	return h
 }
 
-// createControls builds every control. Group boxes come first so that they
-// sit behind the fields they enclose in the sibling z-order.
+// createControls builds every control, in tab order.
 func (a *App) createControls() {
-	a.grpMailbox = a.group()
-	a.grpCopy = a.group()
-	a.grpMove = a.group()
-
-	a.lblLang = a.label()
-	a.cbLang = a.combo(idLang)
+	a.lblLang, a.cbLang = a.label(), a.combo(idLang)
 	for i := range i18n.Count {
 		winapi.ComboAdd(a.cbLang, i18n.Names[i])
 	}
 	winapi.ComboSetSel(a.cbLang, int(a.lang))
+	a.lblTheme, a.cbTheme = a.label(), a.combo(idTheme)
 
 	a.lblEmail, a.edEmail = a.label(), a.edit(idEmail, 0)
 	a.lblPassword, a.edPassword = a.label(), a.edit(idPassword, winapi.ES_PASSWORD)
+	a.lblUser, a.edUser = a.label(), a.edit(idUser, 0)
 	a.lblServer, a.edServer = a.label(), a.edit(idServer, 0)
 	a.lblPort, a.edPort = a.label(), a.edit(idPort, winapi.ES_NUMBER)
-	a.lblUser, a.edUser = a.label(), a.edit(idUser, 0)
 	a.btnTest, a.btnRefresh = a.button(idTest), a.button(idRefresh)
 
-	a.suppressEdit = true
-	winapi.SetWindowText(a.edPort, "993")
-	a.suppressEdit = false
+	a.lblDeleteSrc, a.cbDeleteSrc = a.label(), a.combo(idDeleteSrc)
+	a.deleteFrom, a.deleteTo = a.dateFilter(idDeleteFrom), a.dateFilter(idDeleteTo)
+	a.pbDelete = a.progressBar(true)
+	a.btnDeleteRun = a.button(idDeleteRun)
+	for _, h := range []uintptr{
+		a.lblDeleteSrc, a.cbDeleteSrc,
+		a.deleteFrom.check, a.deleteFrom.picker, a.deleteTo.check, a.deleteTo.picker,
+		a.pbDelete, a.btnDeleteRun,
+	} {
+		a.inDanger[h] = true
+	}
 
 	a.lblCopySrc, a.cbCopySrc = a.label(), a.combo(idCopySrc)
-	a.chkMoveAfter = a.child(classButton,
-		winapi.WS_TABSTOP|winapi.BS_AUTOCHECKBOX|winapi.BS_MULTILINE, idMoveAfter)
+	a.chkMoveAfter = a.checkbox(idMoveAfter, winapi.BS_MULTILINE)
 	a.lblCopyDst, a.cbCopyDst = a.label(), a.combo(idCopyDst)
 	a.btnSaveDir, a.lblSaveDir = a.button(idSaveDir), a.label()
-	a.lblCopyFrom, a.dtCopyFrom, a.btnCopyFromX = a.label(), a.datePicker(idCopyFrom), a.button(idCopyFromX)
-	a.lblCopyTo, a.dtCopyTo, a.btnCopyToX = a.label(), a.datePicker(idCopyTo), a.button(idCopyToX)
+	a.copyFrom, a.copyTo = a.dateFilter(idCopyFrom), a.dateFilter(idCopyTo)
+	a.pbCopy = a.progressBar(false)
 	a.btnCopyRun = a.button(idCopyRun)
-	a.pbCopy = a.progressBar()
 
 	a.lblMoveSrc, a.cbMoveSrc = a.label(), a.combo(idMoveSrc)
 	a.lblMoveDst, a.cbMoveDst = a.label(), a.combo(idMoveDst)
-	a.lblMoveFrom, a.dtMoveFrom, a.btnMoveFromX = a.label(), a.datePicker(idMoveFrom), a.button(idMoveFromX)
-	a.lblMoveTo, a.dtMoveTo, a.btnMoveToX = a.label(), a.datePicker(idMoveTo), a.button(idMoveToX)
+	a.moveFrom, a.moveTo = a.dateFilter(idMoveFrom), a.dateFilter(idMoveTo)
+	a.pbMove = a.progressBar(false)
 	a.btnMoveRun = a.button(idMoveRun)
-	a.pbMove = a.progressBar()
+
+	a.updateEnabled()
+}
+
+func (a *App) dateFilters() []dateFilter {
+	return []dateFilter{a.deleteFrom, a.deleteTo, a.copyFrom, a.copyTo, a.moveFrom, a.moveTo}
 }
 
 // interactive lists the controls that are switched off while a job runs.
-// Labels, group boxes and the progress bars stay as they are: they carry no
-// input, and greying them out would only make the window harder to read.
+// Labels and the progress bars stay as they are: they carry no input, and
+// greying them out would only make the window harder to read.
 func (a *App) interactive() []uintptr {
-	return []uintptr{
-		a.cbLang,
-		a.edEmail, a.edPassword, a.edServer, a.edPort, a.edUser,
+	out := []uintptr{
+		a.cbLang, a.cbTheme,
+		a.edEmail, a.edPassword, a.edUser, a.edServer, a.edPort,
 		a.btnTest, a.btnRefresh,
-		a.cbCopySrc, a.chkMoveAfter, a.cbCopyDst, a.btnSaveDir,
-		a.dtCopyFrom, a.btnCopyFromX, a.dtCopyTo, a.btnCopyToX, a.btnCopyRun,
-		a.cbMoveSrc, a.cbMoveDst,
-		a.dtMoveFrom, a.btnMoveFromX, a.dtMoveTo, a.btnMoveToX, a.btnMoveRun,
+		a.cbDeleteSrc, a.btnDeleteRun,
+		a.cbCopySrc, a.chkMoveAfter, a.cbCopyDst, a.btnSaveDir, a.btnCopyRun,
+		a.cbMoveSrc, a.cbMoveDst, a.btnMoveRun,
+	}
+	for _, d := range a.dateFilters() {
+		out = append(out, d.check, d.picker)
+	}
+	return out
+}
+
+// buttons lists the push buttons and checkboxes, which take the dark visual
+// style of buttons.
+func (a *App) buttons() []uintptr {
+	out := []uintptr{
+		a.btnTest, a.btnRefresh, a.btnDeleteRun,
+		a.chkMoveAfter, a.btnSaveDir, a.btnCopyRun, a.btnMoveRun,
+	}
+	for _, d := range a.dateFilters() {
+		out = append(out, d.check)
+	}
+	return out
+}
+
+// fields lists the edit and combo boxes, which take the dark visual style
+// of input fields. The date pickers have none; see datepicker.go.
+func (a *App) fields() []uintptr {
+	return []uintptr{
+		a.cbLang, a.cbTheme,
+		a.edEmail, a.edPassword, a.edUser, a.edServer, a.edPort,
+		a.cbDeleteSrc, a.cbCopySrc, a.cbCopyDst, a.cbMoveSrc, a.cbMoveDst,
 	}
 }
 
 // all lists every control, which is what the font has to be applied to.
 func (a *App) all() []uintptr {
-	return []uintptr{
-		a.grpMailbox, a.grpCopy, a.grpMove,
-		a.lblLang, a.cbLang,
-		a.lblEmail, a.edEmail, a.lblPassword, a.edPassword,
-		a.lblServer, a.edServer, a.lblPort, a.edPort,
-		a.lblUser, a.edUser, a.btnTest, a.btnRefresh,
-		a.lblCopySrc, a.cbCopySrc, a.chkMoveAfter, a.lblCopyDst, a.cbCopyDst,
-		a.btnSaveDir, a.lblSaveDir,
-		a.lblCopyFrom, a.dtCopyFrom, a.btnCopyFromX,
-		a.lblCopyTo, a.dtCopyTo, a.btnCopyToX,
-		a.btnCopyRun, a.pbCopy,
-		a.lblMoveSrc, a.cbMoveSrc, a.lblMoveDst, a.cbMoveDst,
-		a.lblMoveFrom, a.dtMoveFrom, a.btnMoveFromX,
-		a.lblMoveTo, a.dtMoveTo, a.btnMoveToX,
-		a.btnMoveRun, a.pbMove,
+	out := append(a.buttons(), a.fields()...)
+	for _, d := range a.dateFilters() {
+		out = append(out, d.picker)
 	}
+	return append(out,
+		a.lblLang, a.lblTheme,
+		a.lblEmail, a.lblPassword, a.lblUser, a.lblServer, a.lblPort,
+		a.lblDeleteSrc, a.lblCopySrc, a.lblCopyDst, a.lblSaveDir,
+		a.lblMoveSrc, a.lblMoveDst,
+		a.pbDelete, a.pbCopy, a.pbMove,
+	)
 }
 
 // ------------------------------------------------------------------ Layout
@@ -215,6 +272,23 @@ func (a *App) place(hwnd uintptr, x, y, w, h int32) {
 	winapi.MoveWindow(hwnd, a.px(x), a.px(y), a.px(w), a.px(h), true)
 }
 
+// textWidth is the logical width of s in the UI font.
+func (a *App) textWidth(s string) int32 {
+	return int32(math.Ceil(float64(winapi.TextWidth(a.hwnd, a.font, s)) / a.scale))
+}
+
+// buttonWidth sizes a push button to its caption, so that it is no wider
+// than its text needs. Several captions can be given for a button whose text
+// changes, such as Start/Stop; the widest one wins, so the button does not
+// jump when its caption flips.
+func (a *App) buttonWidth(captions ...string) int32 {
+	w := int32(0)
+	for _, c := range captions {
+		w = max(w, a.textWidth(c))
+	}
+	return max(w+2*btnPad, btnMinW)
+}
+
 // show hides or shows a control without disturbing the rest of the layout.
 func show(hwnd uintptr, visible bool) {
 	if visible {
@@ -224,7 +298,7 @@ func show(hwnd uintptr, visible bool) {
 	}
 }
 
-// applyDPI lays the whole window out for the given DPI: it rebuilds the font
+// applyDPI lays the whole window out for the given DPI: it rebuilds the fonts
 // at the new size, resizes the window and repositions every control. On a
 // WM_DPICHANGED the suggested rectangle carries the position Windows wants
 // the window moved to; at start-up it is nil and the window stays put.
@@ -235,18 +309,35 @@ func (a *App) applyDPI(dpi uint32, suggested *winapi.Rect) {
 	a.dpi = dpi
 	a.scale = float64(dpi) / 96
 
-	if a.font != 0 {
-		winapi.DeleteObject(a.font)
+	for _, f := range []uintptr{a.font, a.fontBold} {
+		if f != 0 {
+			winapi.DeleteObject(f)
+		}
 	}
 	// A negative height asks for a character height, which is how a 9pt UI
 	// font maps onto whatever DPI this monitor has.
-	a.font = winapi.CreateFont(-(9*int32(dpi))/72, 400)
+	height := -(9 * int32(dpi)) / 72
+	a.font = winapi.CreateFont(height, 400)
+	a.fontBold = winapi.CreateFont(height, 600)
 	for _, h := range a.all() {
 		winapi.SendMessage(h, winapi.WM_SETFONT, a.font, 1)
 	}
 
+	a.resize(suggested)
+	a.setWindowIcons()
+}
+
+// relayout re-runs the layout after something changed its shape: the
+// checkbox that reveals the target folder combo, or a language whose
+// captions are wider or narrower.
+func (a *App) relayout() {
+	a.resize(nil)
+}
+
+// resize fits the window around the content and lays the controls out.
+func (a *App) resize(suggested *winapi.Rect) {
 	client := winapi.Rect{Right: a.px(winW), Bottom: a.px(a.contentHeight())}
-	frame := winapi.AdjustWindowRect(client, mainStyle(), winapi.WS_EX_CONTROLPARENT, dpi)
+	frame := winapi.AdjustWindowRect(client, mainStyle(), winapi.WS_EX_CONTROLPARENT, a.dpi)
 
 	flags := uint32(winapi.SWP_NOZORDER | winapi.SWP_NOACTIVATE)
 	var x, y int32
@@ -258,7 +349,6 @@ func (a *App) applyDPI(dpi uint32, suggested *winapi.Rect) {
 	winapi.SetWindowPos(a.hwnd, 0, x, y, frame.Width(), frame.Height(), flags)
 
 	a.layoutAll()
-	a.setWindowIcons()
 
 	// Erase and redraw everything at once: the controls have just moved, and
 	// the area they came from has to go back to the window background.
@@ -266,189 +356,254 @@ func (a *App) applyDPI(dpi uint32, suggested *winapi.Rect) {
 	winapi.UpdateWindow(a.hwnd)
 }
 
-// relayout re-runs the layout after something changed its shape - the only
-// such thing being the checkbox that reveals the target folder combo.
-func (a *App) relayout() {
-	a.applyDPI(a.dpi, nil)
-}
-
-// taskGroupHeight is the height both task group boxes get, so they line up
+// taskGroupHeight is the height both lower panels get, so they line up
 // however many rows each of them currently needs.
 func (a *App) taskGroupHeight() int32 {
-	copyH := int32(groupTop+rowPitch) + chkPitch + savePitch + 2*rowPitch + runPitch + pbH + groupBottom
+	copyH := int32(groupTop + rowPitch + chkPitch + savePitch + 2*rowPitch + runGap + btnH + groupBottom)
 	if a.moveAfterCopy() {
 		copyH += rowPitch
 	}
-	moveH := int32(groupTop+4*rowPitch) + runPitch + pbH + groupBottom
-	if moveH > copyH {
-		return moveH
-	}
-	return copyH
+	moveH := int32(groupTop + 4*rowPitch + runGap + btnH + groupBottom)
+	return max(copyH, moveH)
 }
 
-const mailboxH = groupTop + 3*rowPitch + 8 + btnH + groupBottom
-
 func (a *App) contentHeight() int32 {
-	return 10 + 34 + mailboxH + gapV + a.taskGroupHeight() + gapV
+	return topY + topRowH + mailboxH + gapV + a.taskGroupHeight() + gapV
 }
 
 func (a *App) layoutAll() {
-	y := int32(10)
+	y := int32(topY)
 
-	// Language row.
-	a.place(a.lblLang, margin+2, y+2, 110, rowH)
-	a.place(a.cbLang, margin+120, y, 200, rowH+comboDrop)
-	y += 34
+	// Language and theme, side by side.
+	x := int32(margin + 2)
+	w := a.textWidth(a.tr.Language) + labelGap
+	a.place(a.lblLang, x, y, w, rowH)
+	x += w
+	a.place(a.cbLang, x, y, langW, rowH+comboDrop)
+	x += langW + 2*gapH
+	w = a.textWidth(a.tr.Theme) + labelGap
+	a.place(a.lblTheme, x, y, w, rowH)
+	x += w
+	a.place(a.cbTheme, x, y, langW, rowH+comboDrop)
+	y += topRowH
 
-	a.layoutMailbox(margin, y, winW-2*margin)
+	right := int32(margin + groupW + gapH)
+	a.panels[pnlMailbox] = panelRect{margin, y, groupW, mailboxH}
+	a.panels[pnlDelete] = panelRect{right, y, groupW, mailboxH}
+	a.layoutMailbox(a.panels[pnlMailbox])
+	a.layoutDelete(a.panels[pnlDelete])
 	y += mailboxH + gapV
 
 	h := a.taskGroupHeight()
-	a.layoutCopy(margin, y, groupW, h)
-	a.layoutMove(margin+groupW+gapH, y, groupW, h)
+	a.panels[pnlCopy] = panelRect{margin, y, groupW, h}
+	a.panels[pnlMove] = panelRect{right, y, groupW, h}
+	a.layoutCopy(a.panels[pnlCopy])
+	a.layoutMove(a.panels[pnlMove])
 }
 
-func (a *App) layoutMailbox(gx, gy, gw int32) {
-	a.place(a.grpMailbox, gx, gy, gw, mailboxH)
+// inner returns the left edge, the input column and the right edge of a
+// panel's content area.
+func (p panelRect) inner() (left, ctlX, right int32) {
+	left = p.x + groupInset
+	return left, left + ctlOff, p.x + p.w - groupInset
+}
 
-	innerL := gx + groupInset
-	innerW := gw - 2*groupInset
-	colW := (innerW - 24) / 2
-	colB := innerL + colW + 24
-	ctlW := colW - labelW - labelGap
-
-	row := func(n int32) int32 { return gy + groupTop + n*rowPitch }
-	field := func(lbl, ctl uintptr, x, y, w int32) {
-		a.place(lbl, x, y+2, labelW, rowH)
-		a.place(ctl, x+labelW+labelGap, y, w, rowH)
+// field places a label and its input on one row.
+func (a *App) field(p panelRect, lbl, ctl uintptr, y, w int32) {
+	left, ctlX, right := p.inner()
+	if w <= 0 {
+		w = right - ctlX
 	}
-
-	field(a.lblEmail, a.edEmail, innerL, row(0), ctlW)
-	field(a.lblPassword, a.edPassword, innerL, row(1), ctlW)
-	field(a.lblUser, a.edUser, innerL, row(2), ctlW)
-
-	field(a.lblServer, a.edServer, colB, row(0), ctlW)
-	field(a.lblPort, a.edPort, colB, row(1), 90)
-
-	by := row(3) + 8
-	a.place(a.btnTest, innerL, by, 210, btnH)
-	a.place(a.btnRefresh, innerL+220, by, 230, btnH)
+	a.place(lbl, left, y, labelW, rowH)
+	a.place(ctl, ctlX, y, w, rowH)
 }
 
-func (a *App) layoutCopy(gx, gy, gw, gh int32) {
-	a.place(a.grpCopy, gx, gy, gw, gh)
+// comboField is field for a combo box, whose height includes its list.
+func (a *App) comboField(p panelRect, lbl, combo uintptr, y int32) {
+	left, ctlX, right := p.inner()
+	a.place(lbl, left, y, labelW, rowH)
+	a.place(combo, ctlX, y, right-ctlX, rowH+comboDrop)
+}
 
-	innerL := gx + groupInset
-	innerW := gw - 2*groupInset
-	ctlX := innerL + labelW + labelGap
-	ctlW := innerL + innerW - ctlX
+func (a *App) dateRow(p panelRect, d dateFilter, y int32) {
+	left, ctlX, _ := p.inner()
+	a.place(d.check, left, y, labelW, rowH)
+	a.place(d.picker, ctlX, y, dtW, rowH)
+}
 
-	y := gy + groupTop
+// runRow puts a progress bar and, after it on the same line, the button that
+// starts the job, sized to its caption. The row sits at the bottom of the
+// panel, so the bars of neighbouring panels line up.
+func (a *App) runRow(p panelRect, bar, btn uintptr) {
+	left, _, right := p.inner()
+	y := p.y + p.h - groupBottom - btnH
+	w := a.buttonWidth(a.tr.Start, a.tr.Stop)
+	a.place(btn, right-w, y, w, btnH)
+	a.place(bar, left, y+1, right-w-gapH-left, btnH-2)
+}
 
-	a.place(a.lblCopySrc, innerL, y+2, labelW, rowH)
-	a.place(a.cbCopySrc, ctlX, y, ctlW, rowH+comboDrop)
+func (a *App) layoutMailbox(p panelRect) {
+	left, ctlX, right := p.inner()
+	row := func(n int32) int32 { return p.y + groupTop + n*rowPitch }
+
+	a.field(p, a.lblEmail, a.edEmail, row(0), 0)
+	a.field(p, a.lblPassword, a.edPassword, row(1), 0)
+	a.field(p, a.lblUser, a.edUser, row(2), 0)
+	a.field(p, a.lblServer, a.edServer, row(3), 0)
+	a.field(p, a.lblPort, a.edPort, row(4), 90)
+
+	// The second button lines up with the input fields above it.
+	by := row(5) + 4
+	a.place(a.btnTest, left, by, labelW, btnH)
+	a.place(a.btnRefresh, ctlX, by, right-ctlX, btnH)
+}
+
+func (a *App) layoutDelete(p panelRect) {
+	y := p.y + groupTop
+	a.comboField(p, a.lblDeleteSrc, a.cbDeleteSrc, y)
+	y += rowPitch
+	a.dateRow(p, a.deleteFrom, y)
+	y += rowPitch
+	a.dateRow(p, a.deleteTo, y)
+
+	a.runRow(p, a.pbDelete, a.btnDeleteRun)
+}
+
+func (a *App) layoutCopy(p panelRect) {
+	left, _, right := p.inner()
+	y := p.y + groupTop
+
+	a.comboField(p, a.lblCopySrc, a.cbCopySrc, y)
 	y += rowPitch
 
-	a.place(a.chkMoveAfter, innerL, y, innerW, chkH)
+	a.place(a.chkMoveAfter, left, y, right-left, chkH)
 	y += chkPitch
 
 	moveAfter := a.moveAfterCopy()
 	show(a.lblCopyDst, moveAfter)
 	show(a.cbCopyDst, moveAfter)
 	if moveAfter {
-		a.place(a.lblCopyDst, innerL, y+2, labelW, rowH)
-		a.place(a.cbCopyDst, ctlX, y, ctlW, rowH+comboDrop)
+		a.comboField(p, a.lblCopyDst, a.cbCopyDst, y)
 		y += rowPitch
 	}
 
-	a.place(a.btnSaveDir, innerL, y, 220, btnH)
-	a.place(a.lblSaveDir, innerL+230, y+3, innerW-230, rowH)
+	w := a.buttonWidth(a.tr.ChooseSaveDir)
+	a.place(a.btnSaveDir, left, y, w, btnH)
+	a.place(a.lblSaveDir, left+w+10, y+2, right-left-w-10, rowH)
 	y += savePitch
 
-	a.dateRow(a.lblCopyFrom, a.dtCopyFrom, a.btnCopyFromX, innerL, y, ctlX)
+	a.dateRow(p, a.copyFrom, y)
 	y += rowPitch
-	a.dateRow(a.lblCopyTo, a.dtCopyTo, a.btnCopyToX, innerL, y, ctlX)
-	y += rowPitch
+	a.dateRow(p, a.copyTo, y)
 
-	a.place(a.btnCopyRun, innerL, y, 220, btnH+2)
-
-	a.place(a.pbCopy, innerL, gy+gh-groupBottom-pbH, innerW, pbH)
+	a.runRow(p, a.pbCopy, a.btnCopyRun)
 }
 
-func (a *App) layoutMove(gx, gy, gw, gh int32) {
-	a.place(a.grpMove, gx, gy, gw, gh)
+func (a *App) layoutMove(p panelRect) {
+	y := p.y + groupTop
 
-	innerL := gx + groupInset
-	innerW := gw - 2*groupInset
-	ctlX := innerL + labelW + labelGap
-	ctlW := innerL + innerW - ctlX
-
-	y := gy + groupTop
-
-	a.place(a.lblMoveSrc, innerL, y+2, labelW, rowH)
-	a.place(a.cbMoveSrc, ctlX, y, ctlW, rowH+comboDrop)
+	a.comboField(p, a.lblMoveSrc, a.cbMoveSrc, y)
 	y += rowPitch
-
-	a.place(a.lblMoveDst, innerL, y+2, labelW, rowH)
-	a.place(a.cbMoveDst, ctlX, y, ctlW, rowH+comboDrop)
+	a.comboField(p, a.lblMoveDst, a.cbMoveDst, y)
 	y += rowPitch
-
-	a.dateRow(a.lblMoveFrom, a.dtMoveFrom, a.btnMoveFromX, innerL, y, ctlX)
+	a.dateRow(p, a.moveFrom, y)
 	y += rowPitch
-	a.dateRow(a.lblMoveTo, a.dtMoveTo, a.btnMoveToX, innerL, y, ctlX)
-	y += rowPitch
+	a.dateRow(p, a.moveTo, y)
 
-	a.place(a.btnMoveRun, innerL, y, 220, btnH+2)
-
-	a.place(a.pbMove, innerL, gy+gh-groupBottom-pbH, innerW, pbH)
+	a.runRow(p, a.pbMove, a.btnMoveRun)
 }
 
-func (a *App) dateRow(lbl, picker, clearBtn uintptr, x, y, ctlX int32) {
-	a.place(lbl, x, y+2, labelW, rowH)
-	a.place(picker, ctlX, y, dtW, rowH)
-	a.place(clearBtn, ctlX+dtW+clearGap, y, clearW, rowH)
+// ------------------------------------------------------------------ Panels
+
+func (a *App) panelCaption(id panelID) string {
+	switch id {
+	case pnlMailbox:
+		return a.tr.GroupMailbox
+	case pnlDelete:
+		return a.tr.GroupDelete
+	case pnlCopy:
+		return a.tr.GroupCopy
+	case pnlMove:
+		return a.tr.GroupMove
+	}
+	return ""
+}
+
+// paintPanels draws the rounded frames the controls are grouped in, with
+// their captions. The danger panel is filled in its warning colour; the
+// controls on it pick the same colour up through WM_CTLCOLOR*.
+func (a *App) paintPanels(hdc uintptr) {
+	winapi.SetBkMode(hdc, winapi.TRANSPARENT)
+	oldFont := winapi.SelectObject(hdc, a.fontBold)
+	defer winapi.SelectObject(hdc, oldFont)
+
+	for id := range panelCount {
+		p := a.panels[id]
+		fill, edge, text := a.pal.window, a.pal.panelEdge, a.pal.text
+		if id == pnlDelete {
+			fill, edge, text = a.pal.danger, a.pal.dangerEdge, a.pal.dangerText
+		}
+
+		frame := winapi.Rect{Left: a.px(p.x), Top: a.px(p.y), Right: a.px(p.x + p.w), Bottom: a.px(p.y + p.h)}
+		fillRounded(hdc, frame, a.px(panelRadius), fill, edge)
+
+		caption := winapi.Rect{
+			Left:   a.px(p.x + groupInset),
+			Top:    a.px(p.y + captionTop),
+			Right:  a.px(p.x + p.w - groupInset),
+			Bottom: a.px(p.y + groupTop - 4),
+		}
+		winapi.SetTextColor(hdc, text)
+		winapi.DrawText(hdc, a.panelCaption(id), &caption,
+			winapi.DT_LEFT|winapi.DT_VCENTER|winapi.DT_SINGLELINE|winapi.DT_END_ELLIPSIS)
+	}
 }
 
 // ------------------------------------------------------------- Translation
 
-// retranslate writes every caption in the current language. The layout is
-// fixed, so switching languages never moves a control.
+// retranslate writes every caption in the current language and lays the
+// window out again, since buttons are as wide as their captions.
 func (a *App) retranslate() {
 	tr := a.tr
 	winapi.SetWindowText(a.hwnd, tr.AppTitle)
 
 	winapi.SetWindowText(a.lblLang, tr.Language)
+	winapi.SetWindowText(a.lblTheme, tr.Theme)
+	winapi.ComboReset(a.cbTheme)
+	for _, name := range [themeCount]string{themeLight: tr.ThemeLight, themeDark: tr.ThemeDark} {
+		winapi.ComboAdd(a.cbTheme, name)
+	}
+	winapi.ComboSetSel(a.cbTheme, int(a.theme))
 
-	winapi.SetWindowText(a.grpMailbox, tr.GroupMailbox)
 	winapi.SetWindowText(a.lblEmail, tr.Email)
 	winapi.SetWindowText(a.lblPassword, tr.AppPassword)
+	winapi.SetWindowText(a.lblUser, tr.Username)
 	winapi.SetWindowText(a.lblServer, tr.ImapServer)
 	winapi.SetWindowText(a.lblPort, tr.ImapPort)
-	winapi.SetWindowText(a.lblUser, tr.Username)
 	winapi.SetWindowText(a.btnTest, tr.TestConn)
 	winapi.SetWindowText(a.btnRefresh, tr.RefreshList)
 
-	winapi.SetWindowText(a.grpCopy, tr.GroupCopy)
+	winapi.SetWindowText(a.lblDeleteSrc, tr.TargetFolder)
+
 	winapi.SetWindowText(a.lblCopySrc, tr.SourceFolder)
 	winapi.SetWindowText(a.chkMoveAfter, tr.MoveAfterCopy)
 	winapi.SetWindowText(a.lblCopyDst, tr.TargetFolder)
 	winapi.SetWindowText(a.btnSaveDir, tr.ChooseSaveDir)
-	winapi.SetWindowText(a.lblCopyFrom, tr.DateFrom)
-	winapi.SetWindowText(a.lblCopyTo, tr.DateTo)
 
-	winapi.SetWindowText(a.grpMove, tr.GroupMove)
 	winapi.SetWindowText(a.lblMoveSrc, tr.SourceFolder)
 	winapi.SetWindowText(a.lblMoveDst, tr.TargetFolder)
-	winapi.SetWindowText(a.lblMoveFrom, tr.DateFrom)
-	winapi.SetWindowText(a.lblMoveTo, tr.DateTo)
 
-	for _, h := range []uintptr{a.btnCopyFromX, a.btnCopyToX, a.btnMoveFromX, a.btnMoveToX} {
-		winapi.SetWindowText(h, "✕")
+	for _, pair := range [][2]dateFilter{
+		{a.deleteFrom, a.deleteTo}, {a.copyFrom, a.copyTo}, {a.moveFrom, a.moveTo},
+	} {
+		winapi.SetWindowText(pair[0].check, tr.DateFrom)
+		winapi.SetWindowText(pair[1].check, tr.DateTo)
 	}
 
 	a.relabelFolderCombos()
 	a.updateSaveDirLabel()
 	a.updateRunButtons()
+	a.relayout()
 }
 
 func (a *App) updateSaveDirLabel() {
@@ -459,17 +614,22 @@ func (a *App) updateSaveDirLabel() {
 	winapi.SetWindowText(a.lblSaveDir, a.saveDir)
 }
 
-// updateRunButtons flips the two Start buttons to Stop while their job runs.
+// updateRunButtons flips each Start button to Stop while its job runs.
 func (a *App) updateRunButtons() {
-	copyText, moveText := a.tr.Start, a.tr.Start
-	switch a.running {
-	case taskCopy:
-		copyText = a.tr.Stop
-	case taskMove:
-		moveText = a.tr.Stop
+	for _, b := range []struct {
+		btn uintptr
+		t   task
+	}{
+		{a.btnDeleteRun, taskDelete},
+		{a.btnCopyRun, taskCopy},
+		{a.btnMoveRun, taskMove},
+	} {
+		text := a.tr.Start
+		if a.running == b.t {
+			text = a.tr.Stop
+		}
+		winapi.SetWindowText(b.btn, text)
 	}
-	winapi.SetWindowText(a.btnCopyRun, copyText)
-	winapi.SetWindowText(a.btnMoveRun, moveText)
 }
 
 func (a *App) moveAfterCopy() bool {

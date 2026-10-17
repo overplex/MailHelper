@@ -1,6 +1,10 @@
 package i18n
 
-import "testing"
+import (
+	"reflect"
+	"regexp"
+	"testing"
+)
 
 func TestFromWindowsLangID(t *testing.T) {
 	cases := []struct {
@@ -32,5 +36,39 @@ func TestEveryLanguageHasStrings(t *testing.T) {
 	// An out-of-range language must degrade rather than panic.
 	if Get(Lang(99)) != Get(EN) {
 		t.Error("an unknown language should fall back to English")
+	}
+}
+
+// Every string must be translated, and a translation must take the same
+// printf arguments in the same order as the Russian original, or the UI
+// would print %!d(MISSING) and the like.
+func TestTranslationsAreCompleteAndConsistent(t *testing.T) {
+	verbs := regexp.MustCompile(`%[-+# 0-9.]*[a-zA-Z%]`)
+	base := reflect.ValueOf(*Get(RU))
+	for l := Lang(0); int(l) < Count; l++ {
+		v := reflect.ValueOf(*Get(l))
+		for i := range v.NumField() {
+			name := v.Type().Field(i).Name
+			got := v.Field(i).String()
+			if got == "" {
+				t.Errorf("%s: %s is empty", Names[l], name)
+				continue
+			}
+			want := verbs.FindAllString(base.Field(i).String(), -1)
+			if have := verbs.FindAllString(got, -1); !reflect.DeepEqual(have, want) {
+				t.Errorf("%s: %s uses %v, the Russian original %v", Names[l], name, have, want)
+			}
+		}
+	}
+}
+
+func TestCodesRoundTrip(t *testing.T) {
+	for l := Lang(0); int(l) < Count; l++ {
+		if got, ok := FromCode(l.Code()); !ok || got != l {
+			t.Errorf("FromCode(%q) = %v, %v", l.Code(), got, ok)
+		}
+	}
+	if _, ok := FromCode("xx"); ok {
+		t.Error("an unknown code must not be accepted")
 	}
 }

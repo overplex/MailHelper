@@ -13,11 +13,17 @@ import (
 )
 
 // onCommand routes WM_COMMAND from every control.
-func (a *App) onCommand(id, notify uint16, _ uintptr) {
+func (a *App) onCommand(id, notify uint16) {
 	switch int(id) {
 	case idLang:
 		if notify == winapi.CBN_SELCHANGE {
 			a.setLanguage(i18n.Lang(winapi.ComboGetSel(a.cbLang)))
+		}
+	case idTheme:
+		if notify == winapi.CBN_SELCHANGE {
+			if t := theme(winapi.ComboGetSel(a.cbTheme)); t != a.theme {
+				a.setTheme(t)
+			}
 		}
 
 	case idEmail:
@@ -56,40 +62,33 @@ func (a *App) onCommand(id, notify uint16, _ uintptr) {
 			}
 		}
 
-	case idCopyFromX, idCopyToX, idMoveFromX, idMoveToX:
+	case idDeleteFrom, idDeleteTo, idCopyFrom, idCopyTo, idMoveFrom, idMoveTo:
 		if notify == winapi.BN_CLICKED {
-			a.clearDate(map[int]uintptr{
-				idCopyFromX: a.dtCopyFrom,
-				idCopyToX:   a.dtCopyTo,
-				idMoveFromX: a.dtMoveFrom,
-				idMoveToX:   a.dtMoveTo,
-			}[int(id)])
+			// A picker is usable only while its date filter is switched on.
+			a.updateEnabled()
 		}
 
+	case idDeleteRun:
+		a.onRun(notify, taskDelete, a.startDelete)
 	case idCopyRun:
-		if notify == winapi.BN_CLICKED {
-			switch a.running {
-			case taskCopy:
-				a.stopRunning()
-			case taskNone:
-				a.startCopy()
-			}
-		}
+		a.onRun(notify, taskCopy, a.startCopy)
 	case idMoveRun:
-		if notify == winapi.BN_CLICKED {
-			switch a.running {
-			case taskMove:
-				a.stopRunning()
-			case taskNone:
-				a.startMove()
-			}
-		}
+		a.onRun(notify, taskMove, a.startMove)
 	}
 }
 
-func (a *App) clearDate(picker uintptr) {
-	winapi.DateSetNone(picker)
-	winapi.InvalidateRect(picker, true)
+// onRun handles a Start/Stop button: it stops the job the button belongs to
+// while that job runs, and starts it when nothing runs at all.
+func (a *App) onRun(notify uint16, t task, start func()) {
+	if notify != winapi.BN_CLICKED {
+		return
+	}
+	switch a.running {
+	case t:
+		a.stopRunning()
+	case taskNone:
+		start()
+	}
 }
 
 func (a *App) setLanguage(l i18n.Lang) {
@@ -99,7 +98,6 @@ func (a *App) setLanguage(l i18n.Lang) {
 	a.lang = l
 	a.tr = i18n.Get(l)
 	a.retranslate()
-	winapi.InvalidateRect(a.hwnd, true)
 }
 
 // ------------------------------------------------------- Mailbox shortcuts
@@ -133,6 +131,8 @@ var knownIMAP = map[string]string{
 	"qq.com":         "imap.qq.com",
 }
 
+const defaultPort = "993"
+
 // onEmailChanged copies the address into the user name field and fills in
 // the server and port for the domain - until the user edits either field
 // themselves, after which their value is left alone.
@@ -148,7 +148,7 @@ func (a *App) onEmailChanged() {
 	if !a.userSetServer {
 		if host := guessServer(email); host != "" {
 			winapi.SetWindowText(a.edServer, host)
-			winapi.SetWindowText(a.edPort, "993")
+			winapi.SetWindowText(a.edPort, defaultPort)
 		}
 	}
 }
@@ -170,7 +170,9 @@ func guessServer(email string) string {
 
 // ------------------------------------------------------------- Field access
 
-func (a *App) mailboxConfig() (imapc.Config, string) {
+// mailboxConfig reads the mailbox settings. problem is a message for the
+// user when something is missing or wrong.
+func (a *App) mailboxConfig() (cfg imapc.Config, problem string) {
 	email := strings.TrimSpace(winapi.GetWindowText(a.edEmail))
 	password := winapi.GetWindowText(a.edPassword)
 	server := strings.TrimSpace(winapi.GetWindowText(a.edServer))
@@ -214,10 +216,13 @@ func (a *App) selectedFolder(combo uintptr) (imapc.Folder, bool) {
 	return a.folders[i], true
 }
 
-// dateOf reads a picker, returning nil when the user has left the date
-// unset - which the tasks treat as "no limit on this side".
-func dateOf(picker uintptr) *time.Time {
-	st, ok := winapi.DateGet(picker)
+// date reads one end of a period, returning nil when the filter is switched
+// off - which the jobs treat as "no limit on this side".
+func (d dateFilter) date() *time.Time {
+	if !winapi.Checked(d.check) {
+		return nil
+	}
+	st, ok := winapi.DateGet(d.picker)
 	if !ok {
 		return nil
 	}
@@ -225,30 +230,36 @@ func dateOf(picker uintptr) *time.Time {
 	return &t
 }
 
-// checkDateOrder rejects a range that runs backwards.
-func (a *App) checkDateOrder(from, to *time.Time) string {
+// period reads a pair of date filters and rejects a range that runs
+// backwards.
+func (a *App) period(fromFilter, toFilter dateFilter) (from, to *time.Time, problem string) {
+	from, to = fromFilter.date(), toFilter.date()
 	if from != nil && to != nil && from.After(*to) {
-		return a.tr.ErrDateOrder
+		return nil, nil, a.tr.ErrDateOrder
 	}
-	return ""
+	return from, to, ""
 }
 
 // ------------------------------------------------------------ Folder combos
 
-// fillFolders refreshes both pairs of folder combos, keeping whatever was
-// selected before when the folder is still there. Names arrive already
-// decoded from modified UTF-7, so Cyrillic folders read correctly.
+// fillFolders refreshes every folder combo, keeping whatever was selected
+// before when the folder is still there. Names arrive already decoded from
+// modified UTF-7, so Cyrillic folders read correctly.
 func (a *App) fillFolders(folders []imapc.Folder) {
 	combos := a.folderCombos()
 
 	// Read what is selected now, while a.folders still describes the lists
-	// the indices belong to.
+	// the indices belong to. A combo with nothing selected yet falls back to
+	// the choice restored from the settings.
 	previous := make([]string, len(combos))
 	for i, c := range combos {
 		if f, ok := a.selectedFolder(c); ok {
 			previous[i] = f.Raw
+		} else {
+			previous[i] = a.wanted[c]
 		}
 	}
+	clear(a.wanted)
 
 	selectable := make([]imapc.Folder, 0, len(folders))
 	for _, f := range folders {
@@ -258,34 +269,41 @@ func (a *App) fillFolders(folders []imapc.Folder) {
 	}
 	a.folders = selectable
 
-	for _, c := range combos {
-		winapi.ComboReset(c)
-		for _, f := range a.folders {
-			winapi.ComboAdd(c, f.DisplayName(a.tr.FolderInbox))
-		}
-	}
-
 	for i, c := range combos {
+		a.fillCombo(c)
 		index := -1
 		if previous[i] != "" {
 			index = a.indexOfRaw(previous[i])
 		}
 		if index < 0 {
-			// Nothing to restore, or the folder is gone from the server.
-			if c == a.cbCopySrc || c == a.cbMoveSrc {
-				index = a.indexOfInbox()
-			} else {
-				// The move task is meant to land in the Trash by default;
-				// the user can pick anything else from the same list.
-				index = a.indexOfTrash()
-			}
+			index = a.defaultFolder(c)
 		}
 		winapi.ComboSetSel(c, index)
 	}
 }
 
+// defaultFolder is the folder a combo starts on when there is nothing to
+// restore: INBOX for a source, the Trash for a move target, and nothing at
+// all for the folder to delete from, which the user has to pick on purpose.
+func (a *App) defaultFolder(combo uintptr) int {
+	switch combo {
+	case a.cbCopySrc, a.cbMoveSrc:
+		return a.indexOfInbox()
+	case a.cbCopyDst, a.cbMoveDst:
+		return a.indexOfTrash()
+	}
+	return -1
+}
+
 func (a *App) folderCombos() []uintptr {
-	return []uintptr{a.cbCopySrc, a.cbCopyDst, a.cbMoveSrc, a.cbMoveDst}
+	return []uintptr{a.cbDeleteSrc, a.cbCopySrc, a.cbCopyDst, a.cbMoveSrc, a.cbMoveDst}
+}
+
+func (a *App) fillCombo(c uintptr) {
+	winapi.ComboReset(c)
+	for _, f := range a.folders {
+		winapi.ComboAdd(c, f.DisplayName(a.tr.FolderInbox))
+	}
 }
 
 // relabelFolderCombos rewrites the lists in the new language. Only INBOX
@@ -294,10 +312,7 @@ func (a *App) folderCombos() []uintptr {
 func (a *App) relabelFolderCombos() {
 	for _, c := range a.folderCombos() {
 		selected := winapi.ComboGetSel(c)
-		winapi.ComboReset(c)
-		for _, f := range a.folders {
-			winapi.ComboAdd(c, f.DisplayName(a.tr.FolderInbox))
-		}
+		a.fillCombo(c)
 		winapi.ComboSetSel(c, selected)
 	}
 }
@@ -359,4 +374,12 @@ func (a *App) warn(text string) {
 
 func (a *App) fail(text string) {
 	winapi.MessageBox(a.hwnd, text, a.tr.CapError, winapi.MB_OK|winapi.MB_ICONERROR)
+}
+
+// confirm asks a yes/no question with "No" as the default answer, so that
+// pressing Enter by reflex does not set off a destructive job.
+func (a *App) confirm(text string) bool {
+	answer := winapi.MessageBox(a.hwnd, text, a.tr.CapConfirm,
+		winapi.MB_YESNO|winapi.MB_ICONWARNING|winapi.MB_DEFBUTTON2)
+	return answer == winapi.IDYES
 }

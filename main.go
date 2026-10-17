@@ -1,13 +1,13 @@
 //go:build windows
 
 // MailHelper copies messages from an IMAP mailbox into dated folders on
-// disk, and moves messages between folders on the server. The window is
+// disk, moves messages between folders on the server and deletes them. The window is
 // plain Win32 with per-monitor DPI awareness, so dragging it between
 // monitors with different resolutions and scaling keeps it crisp.
 //
 // Build:
 //
-//	go build -ldflags "-H=windowsgui -s -w" -o MailHelper.exe .
+//	go build -trimpath -ldflags "-H=windowsgui -s -w" -o MailHelper.exe .
 package main
 
 import (
