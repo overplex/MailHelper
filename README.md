@@ -1,6 +1,6 @@
 # MailHelper
 
-A Windows 11 desktop tool for an IMAP mailbox. It does two jobs:
+A Windows 10/11 desktop tool for an IMAP mailbox. It does three jobs:
 
 * **Copy to a folder on disk** - saves the messages of a period into dated
   folders, one folder per message, with the attachments as files and a
@@ -9,19 +9,38 @@ A Windows 11 desktop tool for an IMAP mailbox. It does two jobs:
 * **Move from folder to folder on the server** - moves the messages of a
   period into another server folder (the Trash by default) with
   COPY + `\Deleted` + EXPUNGE.
+* **Delete messages** - removes the messages of a period from a server folder
+  for good with `\Deleted` + EXPUNGE, after a confirmation. Its panel is
+  tinted red as the danger zone of the window.
 
-The interface is English and Russian, light theme only. It opens in the
-language Windows itself is displayed in when that is Russian, and in English
-otherwise; the combo box at the top switches it at any time, including while
-the folder lists are already filled.
+The interface is English and Russian, in a light or a dark theme. On the
+first run it opens in the language Windows itself is displayed in when that
+is Russian, and in English otherwise, and in the theme Windows is set to use
+for applications; the two combo boxes at the top switch either at any time,
+including while the folder lists are already filled.
+
+## Settings
+
+The language, the theme, the mailbox settings except the password, the save
+folder, the "move after copying" box and the folders chosen for copying and
+moving are remembered between runs in
+
+```
+%AppData%\MailHelper\settings.json
+```
+
+The file is written when the window closes. The folder to delete from is
+deliberately not remembered, so a destructive job always starts from an
+explicit choice.
 
 ## Build
 
 ```powershell
-go build -ldflags "-H=windowsgui -s -w" -o MailHelper.exe .
+go build -trimpath -ldflags "-H=windowsgui -s -w" -o MailHelper.exe .
 ```
 
-`-H=windowsgui` drops the console window. The only dependency is
+`-H=windowsgui` drops the console window, and `-trimpath` keeps the paths of
+the build machine out of the executable. The only dependency is
 `golang.org/x/text`, for the legacy charsets that Russian mail still arrives
 in; everything else is the standard library plus the Win32 API through
 `syscall`, no cgo and no UI toolkit.
@@ -44,7 +63,7 @@ authentication - Yandex, Gmail, Mail.ru - issue a separate password for IMAP
 clients. The application never writes it anywhere.
 
 **Test connection** and **Refresh folder list** both need only the mailbox
-settings. The folder lists feed all four folder combo boxes.
+settings. The folder lists feed all five folder combo boxes.
 
 ## The window
 
@@ -53,11 +72,13 @@ what makes correct per-monitor DPI behaviour possible.
 
 | Concern | Mechanism |
 | --- | --- |
-| Mixed-DPI monitors | per-monitor v2 awareness in the manifest, plus a `WM_DPICHANGED` handler that rebuilds the font, the frame and every control position |
-| Layout | every size is a logical pixel multiplied by the scale of the monitor the window is on; nothing is measured in physical pixels |
-| Light theme | the window class brush plus `WM_CTLCOLOR*`; the common controls do not follow the system dark mode unless an application opts in |
-| Progress bars | owner-drawn, so the message count "n / m" can sit inside the bar |
-| Date fields | `SysDateTimePick32` with `DTS_SHOWNONE`, whose own checkbox shows at a glance whether the filter is on, plus an **✕** button that clears it in one click |
+| Mixed-DPI monitors | per-monitor v2 awareness in the manifest, plus a `WM_DPICHANGED` handler that rebuilds the fonts, the frame and every control position |
+| Layout | every size is a logical pixel multiplied by the scale of the monitor the window is on; nothing is measured in physical pixels. Buttons are as wide as their captions, so the layout is recomputed when the language changes |
+| Panels | painted by the window itself: a rounded frame with a caption, filled red for **Delete messages**; the controls on a panel take its colour through `WM_CTLCOLOR*` |
+| Themes | `WM_CTLCOLOR*` plus the `DarkMode_Explorer` / `DarkMode_CFD` visual styles for buttons, checkboxes, edits and combo boxes, and `DWMWA_USE_IMMERSIVE_DARK_MODE` for the title bar |
+| Progress bars | owner-drawn, so the message count "n / m" can sit inside the bar; the **Start** button sits after the bar on the same line |
+| Date fields | a regular checkbox that switches the filter on, next to a `SysDateTimePick32` it enables. The picker's own `DTS_SHOWNONE` checkbox is not used: Windows 11 stretches it to the height of the control |
+| Dark date fields | the picker has no dark style and ignores `WM_CTLCOLOR*`, so in the dark theme it paints into an off-screen bitmap whose lightness is inverted, hue kept, before it reaches the screen |
 | Icon | `icon.png` embedded with `go:embed` and rendered to the exact pixel size the shell asks for at the current DPI |
 
 ### Mixed-DPI monitors
@@ -68,16 +89,16 @@ v2 aware** in `winres/winres.json`, and `WM_DPICHANGED` lays everything out
 again at the new scale: the logical size stays put and the window is redrawn
 rather than stretched.
 
-Note that the window has no `WS_CLIPCHILDREN`. A group box is a child window
-covering the fields inside it that paints only its frame; clipping children
-out of the parent's background erase would leave those pixels untouched, and
-a relayout would smear the old control positions across the new ones.
+Note that the window has no `WS_CLIPCHILDREN`. The panels are painted by the
+window underneath its controls, and invalidating the window has to repaint
+the controls on top of them too, which is what Windows does for a parent
+without that style.
 
 ## What the tasks do
 
-Both tasks work in **batches of ten messages**, and both address messages by
-UID, so an EXPUNGE in the middle of a run cannot make the remaining work point
-at the wrong messages.
+All three tasks work in **batches of ten messages**, and all address messages
+by UID, so an EXPUNGE in the middle of a run cannot make the remaining work
+point at the wrong messages.
 
 While a job runs every input control is disabled except the Stop button of
 that job. A pop-up reports the outcome, and the progress bar goes back to
@@ -86,7 +107,8 @@ stop and closes once it has unwound.
 
 ### Dates
 
-Either date field can be left unset, in which case that end is not filtered.
+Either date filter can be left switched off, in which case that end is not
+filtered.
 `From date` becomes IMAP `SINCE`, `To date` becomes `BEFORE` the following day
 so that the day the user picked is included. The server compares against its
 own internal date, so a message that arrived within a few hours of midnight
@@ -133,6 +155,21 @@ are left alone.
 
 Any refusal from the server stops the run at once and reports the reply.
 
+When **Move on the server after copying to disk** is ticked in the copy
+panel, each batch is moved once its messages are on disk. Stopping the job
+in the middle of a batch still moves the messages of that batch already
+saved, so the next run does not copy them a second time.
+
+### Delete messages
+
+`+FLAGS.SILENT (\Deleted)`, then EXPUNGE (`UID EXPUNGE` with UIDPLUS), ten
+UIDs at a time. **Start** first asks "Are you sure? The messages will be
+deleted from your mailbox." with **No** as the default answer. The folder has
+no default either: it stays empty until it is picked by hand.
+
+Without UIDPLUS a plain EXPUNGE also removes any other message in that folder
+that was already flagged `\Deleted` by another client.
+
 ## Folder names
 
 IMAP mailbox names travel in "modified UTF-7" (RFC 3501 5.1.3): `Корзина` goes
@@ -166,11 +203,12 @@ not silently mark it as read.
 
 ```
 main.go                 embeds icon.png, starts the UI
-internal/app/           the window: layout, DPI, events, the two jobs
+internal/app/           the window: layout, DPI, themes, events, the three jobs
 internal/winapi/        the Win32 bindings this application needs
 internal/imapc/         IMAP client, session with retries, modified UTF-7
 internal/mailsave/      MIME -> folder on disk, content.html, Windows-safe names
 internal/i18n/          the English and Russian strings
+internal/settings/      settings.json in %AppData%\MailHelper
 internal/appicon/       icon.png -> HICON at the size the shell asks for
 tools/genicon/          renders winres/icon*.png from icon.png
 ```
@@ -189,22 +227,29 @@ go-winres make --arch amd64 --out rsrc
 The generated `rsrc_windows_amd64.syso` is committed; the intermediate
 `winres/icon*.png` are not.
 
-## Tests
+## Tests and linting
 
 ```powershell
 go test ./...
+golangci-lint run ./...
 ```
+
+The linter configuration is `.golangci.yml` (golangci-lint v2).
 
 The IMAP client is tested against a scripted server over an in-memory pipe:
 folder listing with modified UTF-7 and literal names, `SELECT`/`UID SEARCH`,
 a `FETCH` whose body arrives as a literal, the exact COPY/STORE/EXPUNGE
-sequence a move issues, that a tagged `NO` is not retried, and the INBOX
-relabelling against the folders it must and must not touch, and the mapping
-from a Windows LANGID onto a language. The disk side
-is tested end to end on a windows-1251 message with an RFC 2047 subject, a
-base64 attachment and an embedded image.
+sequence a move issues and the STORE/EXPUNGE sequence a delete issues, that a
+tagged `NO` is not retried, and the INBOX relabelling against the folders it
+must and must not touch. The disk side is tested end to end on a windows-1251
+message with an RFC 2047 subject, a base64 attachment and an embedded image.
+The remaining tests cover the settings file, the mapping from a Windows
+LANGID onto a language, that every string is translated with the same format
+arguments as the Russian original, and the recolouring of the dark date
+fields.
 
-`go vet` reports one `possible misuse of unsafe.Pointer`, in
-`winapi.StructFromLParam`. A window procedure has no other way to read the
-structures Windows hands it; the conversion is confined to that one function
-so the diagnostic has a single, documented home.
+## Licences
+
+`THIRD_PARTY_NOTICES.md` carries the licence of the Go standard library and of
+`golang.org/x/text`, both BSD-3-Clause, whose code is compiled into the
+executable; ship it alongside `MailHelper.exe`.

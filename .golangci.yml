@@ -23,12 +23,10 @@ linters:
         # LazyProc.Call always returns GetLastError as its error, whether the
         # call failed or not; callers inspect the return value instead.
         - (*syscall.LazyProc).Call
-    gocritic:
-      disabled-checks:
-        - ifElseChain
     revive:
       rules:
-        # winapi mirrors Win32 names such as WS_CHILD and WM_COMMAND on purpose.
+        # winapi mirrors Win32 names such as WS_CHILD and WM_COMMAND on purpose,
+        # and its one-line wrappers need no doc comment of their own.
         - name: var-naming
           disabled: true
         - name: exported
