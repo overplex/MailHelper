@@ -1,0 +1,9 @@
+# Build output
+*.exe
+
+# IDE settings
+.idea/
+.vscode/
+
+# Generated from icon.png by tools/genicon; the .syso they feed is committed
+winres/icon*.png
